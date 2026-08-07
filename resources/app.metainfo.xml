@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.github.nalladev.cosmic-notes</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MPL-2.0</project_license>
+  <name>Cosmic Notes</name>
+  <developer id="com.github.nalladev">
+    <name>Joel</name>
+    <url type="homepage">https://github.com/nalladev</url>
+  </developer>
+  <summary>A notes application for the COSMIC desktop</summary>
+  <description>
+    <p>
+      Cosmic Notes is a notes application for the COSMIC desktop.
+      Write, organise, and quickly find your notes with a native,
+      keyboard-friendly experience.
+    </p>
+  </description>
+  <icon type="stock">com.github.nalladev.cosmic-notes</icon>
+  <url type="homepage">https://github.com/nalladev/cosmic-notes</url>
+  <url type="bugtracker">https://github.com/nalladev/cosmic-notes/issues</url>
+  <url type="vcs-browser">https://github.com/nalladev/cosmic-notes</url>
+  <launchable type="desktop-id">com.github.nalladev.cosmic-notes.desktop</launchable>
+  <provides>
+    <id>com.system76.CosmicApplication</id>
+    <binary>cosmic-notes</binary>
+  </provides>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+    <control>touch</control>
+  </supports>
+  <categories>
+    <category>Utility</category>
+  </categories>
+  <keywords>
+    <keyword>COSMIC</keyword>
+    <keyword>notes</keyword>
+  </keywords>
+  <content_rating type="oars-1.1" />
+<releases>
+  <release version="0.1.0" date="2026-08-07">
+    <description>
+      <p>Initial release</p>
+    </description>
+    <url type="details">https://github.com/nalladev/cosmic-notes/releases/tag/v0.1.0</url>
+  </release>
+</releases>
+</component>

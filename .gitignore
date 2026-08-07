@@ -5,6 +5,14 @@ debug/
 target/
 vendor/
 vendor.tar
+**/__pycache__/
+.flatpak-builder/
+flatpak-builder-tools/
+flatpak/local-build.json
+build-dir/
+builddir/
+Cargo.toml.patched
+generate_patched_cargo_toml.py
 debian/*
 !debian/changelog
 !debian/control

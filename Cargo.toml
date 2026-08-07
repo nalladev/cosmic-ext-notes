@@ -40,3 +40,23 @@ features = [
 # libcosmic = { path = "../libcosmic" }
 # cosmic-config = { path = "../libcosmic/cosmic-config" }
 # cosmic-theme = { path = "../libcosmic/cosmic-theme" }
+
+[package.metadata.deb]
+license-file = "LICENSE"
+assets = [
+  ["target/release/cosmic-notes", "usr/bin/", "755"],
+  ["resources/app.desktop", "usr/share/applications/com.github.nalladev.cosmic-notes.desktop", "644"],
+  ["resources/app.metainfo.xml", "usr/share/appdata/com.github.nalladev.cosmic-notes.metainfo.xml", "644"],
+  ["resources/icon.svg", "usr/share/icons/hicolor/scalable/apps/com.github.nalladev.cosmic-notes.svg", "644"],
+
+]
+
+[package.metadata.generate-rpm]
+assets = [
+  { source = "target/release/cosmic-notes", dest = "/usr/bin/cosmic-notes", mode = "755" },
+  { source = "LICENSE", dest = "/usr/share/doc/cosmic-notes/LICENSE", doc = true, mode = "644" },
+  { source = "resources/app.desktop", dest = "/usr/share/applications/com.github.nalladev.cosmic-notes.desktop", mode = "644" },
+  { source = "resources/app.metainfo.xml", dest = "/usr/share/appdata/com.github.nalladev.cosmic-notes.metainfo.xml", mode = "644" },
+  { source = "resources/icon.svg", dest = "/usr/share/icons/hicolor/scalable/apps/com.github.nalladev.cosmic-notes.svg", mode = "644" },
+
+]
