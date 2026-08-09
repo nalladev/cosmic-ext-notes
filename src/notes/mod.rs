@@ -248,6 +248,9 @@ impl Vault {
 
         write_atomic(&note.path, &new_text)?;
         note.loaded = new_text;
+        note.modified = fs::metadata(&note.path)
+            .and_then(|meta| meta.modified())
+            .ok();
         Ok(Some(SaveOutcome::Saved))
     }
 

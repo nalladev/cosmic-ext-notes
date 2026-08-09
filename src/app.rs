@@ -501,7 +501,7 @@ impl cosmic::Application for AppModel {
                     let text = self.editor_text();
                     self.markdown = Some(markdown::Content::parse(&text));
                 }
-                Task::none()
+                self.update_title()
             }
 
             Message::TogglePreview => {
@@ -599,6 +599,8 @@ impl AppModel {
         let save = self.save_active(false);
         match self.vault.create(&fl!("untitled")) {
             Ok(Some(note)) => {
+                // Make sure the new note is visible, even from the trash view.
+                self.nav.activate_position(0);
                 let path = note.path().to_path_buf();
                 self.selected = Some(path);
                 self.load_note(&note);
@@ -981,6 +983,10 @@ impl AppModel {
         if let Some(note) = self.selected_note() {
             window_title.push_str(" — ");
             window_title.push_str(note.title());
+        }
+
+        if self.dirty {
+            window_title = format!("● {window_title}");
         }
 
         if let Some(id) = self.core.main_window_id() {
