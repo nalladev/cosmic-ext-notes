@@ -2,28 +2,21 @@
 name := 'cosmic-notes'
 # The unique ID of the application.
 appid := 'com.github.nalladev.cosmic-notes'
+# The git repository this project is published from.
+repo-url := 'https://github.com/nalladev/cosmic-notes.git'
 
 # Path to root file system, which defaults to `/`.
 rootdir := ''
 # The prefix for the `/usr` directory.
 prefix := '/usr'
-# The location of the cargo target directory.
-cargo-target-dir := env('CARGO_TARGET_DIR', 'target')
 
-# Application's appstream metadata
-appdata := appid + '.metainfo.xml'
-# Application's desktop entry
-desktop := appid + '.desktop'
-# Application's icon.
-icon-svg := appid + '.svg'
-
-# Install destinations
+# Installation paths
 base-dir := absolute_path(clean(rootdir / prefix))
-appdata-dst := base-dir / 'share' / 'appdata' / appdata
+cargo-target-dir := env('CARGO_TARGET_DIR', 'target')
+appdata-dst := base-dir / 'share' / 'appdata' / appid + '.metainfo.xml'
 bin-dst := base-dir / 'bin' / name
-desktop-dst := base-dir / 'share' / 'applications' / desktop
-icons-dst := base-dir / 'share' / 'icons' / 'hicolor'
-icon-svg-dst := icons-dst / 'scalable' / 'apps'
+desktop-dst := base-dir / 'share' / 'applications' / appid + '.desktop'
+icon-dst := base-dir / 'share' / 'icons' / 'hicolor' / 'scalable' / 'apps' / appid + '.svg'
 
 # Default recipe which runs `just build-release`
 default: build-release
@@ -36,12 +29,17 @@ clean:
 clean-vendor:
     rm -rf .cargo vendor vendor.tar
 
-# `cargo clean` and removes vendored dependencies
+# Clean everything build-related: cargo artifacts, vendored deps, flatpak build
+# dirs + cache, python bytecode. Downside: next build and flatpak-install start
+# cold (recompile / re-download). Don't run while a flatpak build is in progress
+# (it removes the temp manifest and build dir being used).
 clean-dist: clean clean-vendor
+    rm -rf build-dir .flatpak-builder flatpak-repo flatpak/local-build.json
+    rm -rf scripts/__pycache__
 
 # Compiles with debug profile
 build-debug *args:
-    cargo build --locked {{args}}
+    cargo build {{args}}
 
 # Compiles with release profile
 build-release *args: (build-debug '--release' args)
@@ -49,48 +47,132 @@ build-release *args: (build-debug '--release' args)
 # Compiles release profile with vendored dependencies
 build-vendored *args: vendor-extract (build-release '--frozen --offline' args)
 
-# Runs a clippy check
-check *args:
-    cargo clippy --all-features --locked {{args}} -- -W clippy::pedantic
+# Formats the codebase
+fmt *args:
+    cargo fmt {{args}}
 
-# Runs a clippy check with JSON message format
-check-json: (check '--message-format=json')
+# Runs a cargo type check
+check *args:
+    cargo check {{args}}
+
+# Runs clippy lints (same flags as CI)
+lint *args:
+    cargo clippy --all --all-targets --all-features {{args}} -- -D warnings -W clippy::pedantic
+
+# Runs clippy lints with JSON message format
+lint-json: (lint '--message-format=json')
 
 # Run the application for testing purposes
 run *args:
-    env RUST_BACKTRACE=full cargo run --release --locked {{args}}
+    env RUST_BACKTRACE=full cargo run --release {{args}}
 
 # Installs files
 install:
     install -Dm0755 {{ cargo-target-dir / 'release' / name }} {{bin-dst}}
-    install -Dm0644 {{ 'resources' / desktop }} {{desktop-dst}}
-    install -Dm0644 {{ 'resources' / appdata }} {{appdata-dst}}
-    install -Dm0644 {{ 'resources' / 'icons' / 'hicolor' / 'scalable' / 'apps' / icon-svg }} {{icon-svg-dst}}
+    install -Dm0644 resources/app.desktop {{desktop-dst}}
+    install -Dm0644 resources/app.metainfo.xml {{appdata-dst}}
+    install -Dm0644 resources/icon.svg {{icon-dst}}
 
 # Uninstalls installed files
 uninstall:
-    rm {{bin-dst}} {{desktop-dst}} {{appdata-dst}} {{icon-svg-dst}}/{{icon-svg}}
+    rm {{bin-dst}} {{desktop-dst}} {{icon-dst}}
 
-# Vendor dependencies locally
+# Compiles and packages a .deb with the release profile
+build-deb: build-release
+    command -v cargo-deb || cargo install cargo-deb
+    cargo deb
+
+# Installs the locally-built .deb
+install-deb:
+    apt install --reinstall ./target/debian/*.deb
+
+# Compiles and packages an .rpm with the release profile
+build-rpm: build-release
+    command -v cargo-generate-rpm || cargo install cargo-generate-rpm
+    strip -s {{ cargo-target-dir / 'release' / name }}
+    cargo generate-rpm
+
+# Installs the locally-built .rpm
+install-rpm:
+    dnf install ./target/generate-rpm/*.rpm
+
+# Vendor dependencies locally into vendor.tar
 vendor:
     mkdir -p .cargo
-    cargo vendor | head -n -1 > .cargo/config.toml
+    cargo vendor --sync Cargo.toml | head -n -1 > .cargo/config.toml
     echo 'directory = "vendor"' >> .cargo/config.toml
-    tar pcf vendor.tar vendor
-    rm -rf vendor
+    echo >> .cargo/config.toml
+    tar pcf vendor.tar .cargo vendor
+    rm -rf .cargo vendor
 
 # Extracts vendored dependencies
 vendor-extract:
     rm -rf vendor
     tar pxf vendor.tar
 
-# Bump cargo version, create git commit, and create tag
-tag version:
-    find -type f -name Cargo.toml -exec sed -i '0,/^version/s/^version.*/version = "{{version}}"/' '{}' \; -exec git add '{}' \;
-    cargo check
-    cargo clean
-    git add Cargo.lock
-    git commit -m 'release: {{version}}'
-    git commit --amend
-    git tag -a {{version}} -m ''
+# Regenerate flatpak cargo sources only if Cargo.lock changed.
+# The generator is cloned into ${TMPDIR:-/tmp} once; /tmp self-cleans on reboot.
+vendor-flatpak:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    OUT="flatpak/cargo-sources.json"
+    if [ ! -f "$OUT" ] || [ Cargo.lock -nt "$OUT" ]; then
+        echo "Regenerating $OUT ..."
+        CACHE="${TMPDIR:-/tmp}/flatpak-builder-tools"
+        if [ ! -d "$CACHE/.git" ]; then
+            git clone --quiet --depth 1 https://github.com/flatpak/flatpak-builder-tools.git "$CACHE"
+        fi
+        python3 "$CACHE/cargo/flatpak-cargo-generator.py" -o "$OUT" Cargo.lock
+    else
+        echo "$OUT is up to date"
+    fi
 
+# Build and install the local test build from a throwaway copy of the
+# manifest (dir source); the committed manifest keeps its git source.
+flatpak-install: vendor-flatpak
+    #!/usr/bin/env bash
+    set -euo pipefail
+    APP="com.github.nalladev.cosmic-notes"
+    LOCAL="flatpak/local-build.json"
+    python3 scripts/flatpak-manifest.py to-dir "$LOCAL"
+    trap 'rm -f "$LOCAL"' EXIT
+    flatpak uninstall --user -y "$APP" 2>/dev/null || true # clear any existing app
+    rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/flatpak/app/$APP" # clean any stale files
+    flatpak-builder --user --install --force-clean build-dir "$LOCAL"
+    trap - EXIT
+    rm -f "$LOCAL"
+    echo "Installed local test build — launch it from the application menu"
+    echo "Replaces any existing install (store version or local build)"
+
+# Remove the local test build.
+flatpak-uninstall:
+    flatpak uninstall --user com.github.nalladev.cosmic-notes
+    echo "To get the production copy back, reinstall from the COSMIC store."
+
+# Bump the version in Cargo.toml, run cargo check, commit everything staged, and tag.
+# Any changes you staged beforehand (e.g. the AppStream entry via `just release`)
+# are included in the commit automatically.
+# Usage: just tag 1.2.0 "Release notes here" or just tag v1.2.0 "Release notes here"
+tag version message='':
+    # Normalize version: strip leading 'v' if present
+    norm_version=`bash -c 'v="{{version}}"; echo "${v#v}"'` && \
+    find -type f -name Cargo.toml -exec sed -i '0,/^version/s/^version.*/version = "'"$norm_version"'"/' '{}' \; -exec git add '{}' \; && \
+    cargo check && \
+    git add Cargo.lock && \
+    git commit -m 'release: '"$norm_version" && \
+    bash -c 'if [ -n "{{message}}" ]; then git tag -a v'"$norm_version"' -m "{{message}}"; else git tag -a v'"$norm_version"' -m "Release '"$norm_version"'"; fi'
+
+# Update the AppStream entry and the Flatpak manifest tag, then run `just tag`
+# (the staged changes land in the release commit), push main so the release
+# commit is on the remote, then push the new tag, which triggers the GitHub
+# release workflow.
+# Usage: just release 1.2.0 "Release notes here"
+release version message='':
+    # Normalize version: strip leading 'v' if present
+    norm_version=`bash -c 'v="{{version}}"; echo "${v#v}"'` && \
+    python3 scripts/update-metainfo-release.py "$norm_version" "{{message}}" "{{repo-url}}" && \
+    python3 scripts/flatpak-manifest.py to-git "$norm_version" "{{repo-url}}" && \
+    git add resources/app.metainfo.xml flatpak/com.github.nalladev.cosmic-notes.json && \
+    just tag "{{version}}" "{{message}}" && \
+    git push origin main && \
+    git push origin v"$norm_version"

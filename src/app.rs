@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
-const APP_ICON: &[u8] = include_bytes!("../resources/icons/hicolor/scalable/apps/com.github.nalladev.cosmic-notes.svg");
+const APP_ICON: &[u8] = include_bytes!("../resources/icon.svg");
 
 /// The application model stores app-specific state used to describe its interface and
 /// drive its logic.
@@ -27,6 +27,7 @@ pub struct AppModel {
     /// Contains items assigned to the nav bar panel.
     nav: nav_bar::Model,
     /// Key bindings for the application's menu bar.
+    #[allow(clippy::zero_sized_map_values)]
     key_binds: HashMap<menu::KeyBind, MenuAction>,
     /// Configuration data that persists between application runs.
     config: Config,
@@ -58,7 +59,7 @@ impl cosmic::Application for AppModel {
     type Message = Message;
 
     /// Unique identifier in RDNN (reverse domain name notation) format.
-    const APP_ID: &'static str = "dev.mmurphy.Test";
+    const APP_ID: &'static str = "com.github.nalladev.cosmic-notes";
 
     fn core(&self) -> &cosmic::Core {
         &self.core
