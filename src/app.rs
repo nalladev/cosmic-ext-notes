@@ -12,7 +12,7 @@ use cosmic::iced::{Alignment, Length, Subscription, event, keyboard};
 use cosmic::prelude::*;
 use cosmic::widget::{
     self, Toasts, about::About, button, divider, icon, list_column, markdown, menu, nav_bar,
-    text_editor, text_input, toaster,
+    text_editor, text_input, toaster, tooltip,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -244,12 +244,10 @@ impl cosmic::Application for AppModel {
 
     /// Elements to pack at the end of the header bar.
     fn header_end(&self) -> Vec<Element<'_, Self::Message>> {
-        vec![
-            button::icon(icon::from_name("list-add-symbolic"))
-                .on_press(Message::NewNote)
-                .class(cosmic::theme::Button::Icon)
-                .into(),
-        ]
+        let new_note = button::icon(icon::from_name("list-add-symbolic"))
+            .on_press(Message::NewNote)
+            .class(cosmic::theme::Button::Icon);
+        vec![Self::tooltip(new_note.into(), fl!("new-note"))]
     }
 
     /// Enables the COSMIC application to create a nav bar with this model.
@@ -833,6 +831,14 @@ impl AppModel {
             .on_press(Message::TogglePin)
             .selected(note.pinned())
             .class(cosmic::theme::Button::Icon);
+        let pin = Self::tooltip(
+            pin.into(),
+            if note.pinned() {
+                fl!("unpin")
+            } else {
+                fl!("pin")
+            },
+        );
 
         let edit = button::text(fl!("edit"))
             .on_press(Message::TogglePreview)
@@ -899,25 +905,39 @@ impl AppModel {
     /// The actions shown next to the title: trash, or restore and delete.
     fn note_actions(note: &Note) -> Element<'_, Message> {
         if note.in_trash() {
+            let restore = Self::tooltip(
+                button::icon(icon::from_name("edit-undo-symbolic"))
+                    .on_press(Message::RestoreNote(note.path().to_path_buf()))
+                    .class(cosmic::theme::Button::Icon)
+                    .into(),
+                fl!("restore"),
+            );
+            let delete = Self::tooltip(
+                button::icon(icon::from_name("edit-delete-symbolic"))
+                    .on_press(Message::DeleteNote(note.path().to_path_buf()))
+                    .class(cosmic::theme::Button::Icon)
+                    .into(),
+                fl!("delete"),
+            );
             widget::row::with_capacity(2)
-                .push(
-                    button::icon(icon::from_name("edit-undo-symbolic"))
-                        .on_press(Message::RestoreNote(note.path().to_path_buf()))
-                        .class(cosmic::theme::Button::Icon),
-                )
-                .push(
-                    button::icon(icon::from_name("edit-delete-symbolic"))
-                        .on_press(Message::DeleteNote(note.path().to_path_buf()))
-                        .class(cosmic::theme::Button::Icon),
-                )
+                .push(restore)
+                .push(delete)
                 .spacing(cosmic::theme::spacing().space_xxs)
                 .into()
         } else {
-            button::icon(icon::from_name("user-trash-symbolic"))
-                .on_press(Message::TrashNote)
-                .class(cosmic::theme::Button::Icon)
-                .into()
+            Self::tooltip(
+                button::icon(icon::from_name("user-trash-symbolic"))
+                    .on_press(Message::TrashNote)
+                    .class(cosmic::theme::Button::Icon)
+                    .into(),
+                fl!("move-to-trash"),
+            )
         }
+    }
+
+    /// Wraps content in a tooltip with the given text.
+    fn tooltip(content: Element<'static, Message>, text: String) -> Element<'static, Message> {
+        tooltip::tooltip(content, widget::text(text), tooltip::Position::FollowCursor).into()
     }
 
     /// The empty state shown when no note is selected.
