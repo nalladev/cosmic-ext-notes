@@ -13,6 +13,7 @@
     "--socket=wayland",
     "--socket=fallback-x11",
     "--device=dri",
+    "--filesystem=xdg-documents",
     "--talk-name=org.freedesktop.portal.Desktop"
   ],
   "build-options": {
