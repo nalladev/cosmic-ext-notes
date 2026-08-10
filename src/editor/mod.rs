@@ -424,9 +424,35 @@ fn quote_prefix(line: &str) -> Option<(usize, &str)> {
     Some((count, rest.trim()))
 }
 
+/// The block kind that a line of exactly this text would become, used to
+/// auto-convert a block as the user types a markdown prefix.
+///
+/// The prefix characters are stored in the paragraph's content; when the user
+/// types the space that completes a prefix, the editor converts the block
+/// instead of inserting the space.
+#[must_use]
+pub(crate) fn prefix_kind(text: &str) -> Option<BlockKind> {
+    if let Some((level, _)) = heading(text) {
+        return Some(BlockKind::Heading(level));
+    }
+    if let Some((done, _)) = todo_prefix(text) {
+        return Some(BlockKind::Todo(0, done));
+    }
+    if bullet_prefix(text).is_some() {
+        return Some(BlockKind::Bullet(0));
+    }
+    if let Some((number, _)) = numbered_prefix(text) {
+        return Some(BlockKind::Numbered(0, number));
+    }
+    if quote_prefix(text).is_some() {
+        return Some(BlockKind::Quote(0));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_markdown, serialize_markdown, Block, BlockKind};
+    use super::{parse_markdown, prefix_kind, serialize_markdown, Block, BlockKind};
 
     /// Asserts that parsing and re-serializing is the identity for text that
     /// is already in canonical markdown form.
@@ -727,5 +753,25 @@ mod tests {
         assert_eq!(BlockKind::Heading(2).level(), 0);
         assert_eq!(BlockKind::Code(String::new()).level(), 0);
         assert_eq!(BlockKind::Divider.level(), 0);
+    }
+
+    #[test]
+    fn prefix_kind_converts_typed_markers() {
+        assert_eq!(prefix_kind("#"), Some(BlockKind::Heading(1)));
+        assert_eq!(prefix_kind("###"), Some(BlockKind::Heading(3)));
+        assert_eq!(prefix_kind("-"), Some(BlockKind::Bullet(0)));
+        assert_eq!(prefix_kind("*"), Some(BlockKind::Bullet(0)));
+        assert_eq!(prefix_kind("1."), Some(BlockKind::Numbered(0, 1)));
+        assert_eq!(prefix_kind("12."), Some(BlockKind::Numbered(0, 12)));
+        assert_eq!(prefix_kind(">"), Some(BlockKind::Quote(0)));
+        assert_eq!(prefix_kind("[ ]"), Some(BlockKind::Todo(0, false)));
+        assert_eq!(prefix_kind("[x]"), Some(BlockKind::Todo(0, true)));
+        assert_eq!(prefix_kind("[X]"), Some(BlockKind::Todo(0, true)));
+        // Incomplete or unrelated text stays a paragraph.
+        assert_eq!(prefix_kind("#"), Some(BlockKind::Heading(1)));
+        assert_eq!(prefix_kind("##x"), None);
+        assert_eq!(prefix_kind("text"), None);
+        assert_eq!(prefix_kind("1"), None);
+        assert_eq!(prefix_kind(""), None);
     }
 }

@@ -109,6 +109,37 @@ pub enum Message {
     },
     /// Toggle the checked state of the todo block with the given index.
     ToggleTodo(usize),
+    /// Split the block at the cursor (Enter): the text after the cursor moves
+    /// into a new block of `kind` inserted after it.
+    SplitBlock {
+        index: usize,
+        kind: BlockKind,
+        before: String,
+        after: String,
+    },
+    /// Replace the block with the given kind and content (typed markdown
+    /// prefix, or backspace that removes a list marker).
+    ConvertBlock {
+        index: usize,
+        kind: BlockKind,
+        content: String,
+    },
+    /// Shift the nesting level of the block (Tab, Shift+Tab, or backspace on a
+    /// nested item).
+    ChangeLevel {
+        index: usize,
+        delta: i8,
+    },
+    /// Merge the block into the previous one (backspace at the start).
+    MergeUp {
+        index: usize,
+    },
+    /// Move focus to the editable block before the given index, placing the
+    /// caret at its end.
+    FocusPrevious(usize),
+    /// Move focus to the editable block after the given index, placing the
+    /// caret at its start.
+    FocusNext(usize),
     /// Toggle between the editor and the markdown preview.
     TogglePreview,
     /// A link was clicked in the markdown preview.
@@ -579,9 +610,7 @@ impl cosmic::Application for AppModel {
                 };
                 block.content.perform(action);
                 if is_edit {
-                    self.dirty = true;
-                    let text = self.editor_text();
-                    self.markdown = Some(markdown::Content::parse(&text));
+                    self.mark_dirty();
                 }
                 self.update_title()
             }
@@ -592,11 +621,104 @@ impl cosmic::Application for AppModel {
                 };
                 if let BlockKind::Todo(_, done) = &mut block.kind {
                     *done = !*done;
-                    self.dirty = true;
-                    let text = self.editor_text();
-                    self.markdown = Some(markdown::Content::parse(&text));
+                    self.mark_dirty();
                 }
                 self.update_title()
+            }
+
+            Message::SplitBlock {
+                index,
+                kind,
+                before,
+                after,
+            } => {
+                let Some(block) = self.blocks.get_mut(index) else {
+                    return Task::none();
+                };
+                block.content = text_editor::Content::with_text(&before);
+                self.blocks.insert(
+                    index + 1,
+                    EditableBlock {
+                        kind,
+                        content: text_editor::Content::with_text(&after),
+                    },
+                );
+                self.mark_dirty();
+                Task::batch([
+                    Self::focus_block(index + 1).map(cosmic::action::app),
+                    self.update_title(),
+                ])
+            }
+
+            Message::ConvertBlock {
+                index,
+                kind,
+                content,
+            } => {
+                let Some(block) = self.blocks.get_mut(index) else {
+                    return Task::none();
+                };
+                block.kind = kind;
+                block.content = text_editor::Content::with_text(&content);
+                self.mark_dirty();
+                self.update_title()
+            }
+
+            Message::ChangeLevel { index, delta } => {
+                let Some(block) = self.blocks.get_mut(index) else {
+                    return Task::none();
+                };
+                let Some(kind) = Self::shift_level(&block.kind, delta) else {
+                    return Task::none();
+                };
+                block.kind = kind;
+                self.mark_dirty();
+                self.update_title()
+            }
+
+            Message::MergeUp { index } => {
+                if index == 0 || index >= self.blocks.len() {
+                    return Task::none();
+                }
+                let merged = self.blocks.remove(index);
+                let Some(prev) = self.blocks.get_mut(index - 1) else {
+                    return Task::none();
+                };
+                let text = prev.content.text() + &merged.content.text();
+                prev.content = text_editor::Content::with_text(&text);
+                let cursor = Self::end_cursor(&prev.content);
+                prev.content.move_to(cursor);
+                self.mark_dirty();
+                Task::batch([
+                    Self::focus_block(index - 1).map(cosmic::action::app),
+                    self.update_title(),
+                ])
+            }
+
+            Message::FocusPrevious(index) => {
+                let Some(target) = Self::previous_editable(&self.blocks, index) else {
+                    return Task::none();
+                };
+                let Some(block) = self.blocks.get_mut(target) else {
+                    return Task::none();
+                };
+                let cursor = Self::end_cursor(&block.content);
+                block.content.move_to(cursor);
+                Self::focus_block(target).map(cosmic::action::app)
+            }
+
+            Message::FocusNext(index) => {
+                let Some(target) = Self::next_editable(&self.blocks, index) else {
+                    return Task::none();
+                };
+                let Some(block) = self.blocks.get_mut(target) else {
+                    return Task::none();
+                };
+                block.content.move_to(text_editor::Cursor {
+                    position: text_editor::Position { line: 0, column: 0 },
+                    selection: None,
+                });
+                Self::focus_block(target).map(cosmic::action::app)
             }
 
             Message::TogglePreview => {
@@ -679,6 +801,14 @@ impl AppModel {
     fn editor_text(&self) -> String {
         let blocks: Vec<editor::Block> = self.blocks.iter().map(EditableBlock::to_block).collect();
         editor::serialize_markdown(&blocks)
+    }
+
+    /// Marks the editor as having unsaved changes and refreshes the preview
+    /// markdown from the current blocks.
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+        let text = self.editor_text();
+        self.markdown = Some(markdown::Content::parse(&text));
     }
 
     /// Loads the given note into the editor.
@@ -1059,7 +1189,7 @@ impl AppModel {
         let spacing = cosmic::theme::spacing();
         let mut column = widget::column::with_capacity(self.blocks.len());
         for (index, block) in self.blocks.iter().enumerate() {
-            column = column.push(Self::block_element(index, block));
+            column = column.push(Self::block_element(index, block, &self.blocks));
         }
         widget::scrollable(
             widget::container(column.spacing(0))
@@ -1071,10 +1201,18 @@ impl AppModel {
     }
 
     /// Renders a single block as an editable widget.
-    fn block_element(index: usize, block: &EditableBlock) -> Element<'_, Message> {
+    fn block_element<'a>(
+        index: usize,
+        block: &'a EditableBlock,
+        blocks: &'a [EditableBlock],
+    ) -> Element<'a, Message> {
         let spacing = cosmic::theme::spacing();
         let mut editor = cosmic::widget::text_editor(&block.content)
+            .id(cosmic::widget::Id::new(format!("block-{index}")))
             .on_action(move |action| Message::BlockAction { index, action })
+            .key_binding(move |key_press| {
+                Self::block_key_binding(index, block, blocks, key_press)
+            })
             .highlight("markdown", Self::highlight_theme())
             .size(15)
             .padding([spacing.space_xxs, 0]);
@@ -1182,6 +1320,252 @@ impl AppModel {
                 ..Default::default()
             })
             .into()
+    }
+
+    /// Maps a key press in a block's editor to a block-level behavior, falling
+    /// back to the default text editor binding.
+    ///
+    /// This is where Futo-style editing lives: typed markdown prefixes convert
+    /// the block, Enter splits and continues lists, Backspace at the start
+    /// merges or de-lists, and the arrow keys move the caret across blocks.
+    fn block_key_binding(
+        index: usize,
+        block: &EditableBlock,
+        blocks: &[EditableBlock],
+        key_press: text_editor::KeyPress,
+    ) -> Option<text_editor::Binding<Message>> {
+        use cosmic::iced::keyboard::key::Named;
+        use cosmic::widget::text_editor::{Binding, Status};
+
+        // Only intercept keys while the editor is focused.
+        if !matches!(key_press.status, Status::Focused { .. }) {
+            return Binding::from_key_press(key_press);
+        }
+
+        // Code blocks keep their own newlines; dividers have no editor. In
+        // code, Tab inserts a literal tab.
+        if matches!(
+            block.kind,
+            BlockKind::Code(_) | BlockKind::Divider
+        ) {
+            if matches!(block.kind, BlockKind::Code(_))
+                && matches!(
+                    key_press.modified_key.as_ref(),
+                    Key::Named(Named::Tab)
+                )
+                && !key_press.modifiers.shift()
+            {
+                return Some(text_editor::Binding::Insert('\t'));
+            }
+            return Binding::from_key_press(key_press);
+        }
+
+        let cursor = block.content.cursor();
+        let position = cursor.position;
+
+        match key_press.modified_key.as_ref() {
+            Key::Named(Named::Enter) => {
+                Some(Self::enter_binding(index, block))
+            }
+            Key::Named(Named::Backspace) => {
+                if position.line != 0 || position.column != 0 {
+                    // Not at the start of the block: default backspace.
+                    return Binding::from_key_press(key_press);
+                }
+                Self::backspace_binding(index, block, key_press)
+            }
+            Key::Named(Named::Tab) => {
+                let delta = if key_press.modifiers.shift() { -1 } else { 1 };
+                Some(Binding::Custom(Message::ChangeLevel { index, delta }))
+            }
+            Key::Named(Named::ArrowUp) if !key_press.modifiers.shift() => {
+                if position.line == 0
+                    && position.column == 0
+                    && Self::previous_editable(blocks, index).is_some()
+                {
+                    Some(Binding::Custom(Message::FocusPrevious(index)))
+                } else {
+                    Binding::from_key_press(key_press)
+                }
+            }
+            Key::Named(Named::ArrowDown) if !key_press.modifiers.shift() => {
+                let last_line = block.content.line_count().saturating_sub(1);
+                let end = block
+                    .content
+                    .line(last_line)
+                    .map_or(0, |line| line.text.len());
+                if position.line == last_line
+                    && position.column == end
+                    && Self::next_editable(blocks, index).is_some()
+                {
+                    Some(Binding::Custom(Message::FocusNext(index)))
+                } else {
+                    Binding::from_key_press(key_press)
+                }
+            }
+            _ => {
+                if key_press.text.as_deref() == Some(" ") {
+                    // A space may complete a typed markdown prefix.
+                    if let Some(kind) = editor::prefix_kind(&block.content.text()) {
+                        return Some(Binding::Custom(Message::ConvertBlock {
+                            index,
+                            kind,
+                            content: String::new(),
+                        }));
+                    }
+                } else if key_press.text.as_deref() == Some("`")
+                    && block.content.text() == "``"
+                {
+                    // Three backticks open a fenced code block.
+                    return Some(Binding::Custom(Message::ConvertBlock {
+                        index,
+                        kind: BlockKind::Code(String::new()),
+                        content: String::new(),
+                    }));
+                }
+                Binding::from_key_press(key_press)
+            }
+        }
+    }
+
+    /// Shifts the nesting level of a structured block by `delta`, clamped to
+    /// `0..=6`. Returns `None` for kinds without a nesting level.
+    fn shift_level(kind: &BlockKind, delta: i8) -> Option<BlockKind> {
+        let level = kind.level().saturating_add_signed(delta).clamp(0, 6);
+        match kind {
+            BlockKind::Quote(_) => Some(BlockKind::Quote(level)),
+            BlockKind::Bullet(_) => Some(BlockKind::Bullet(level)),
+            BlockKind::Numbered(_, number) => {
+                Some(BlockKind::Numbered(level, *number))
+            }
+            BlockKind::Todo(_, done) => Some(BlockKind::Todo(level, *done)),
+            BlockKind::Paragraph
+            | BlockKind::Heading(_)
+            | BlockKind::Code(_)
+            | BlockKind::Divider => None,
+        }
+    }
+
+    /// The binding for Backspace at the very start of a block: un-nests a
+    /// nested item, removes the marker of a top-level item, or merges the
+    /// block into the previous one.
+    fn backspace_binding(
+        index: usize,
+        block: &EditableBlock,
+        key_press: text_editor::KeyPress,
+    ) -> Option<text_editor::Binding<Message>> {
+        use cosmic::widget::text_editor::Binding;
+        let level = block.kind.level();
+        match &block.kind {
+            BlockKind::Quote(_)
+            | BlockKind::Bullet(_)
+            | BlockKind::Numbered(..)
+            | BlockKind::Todo(..) if level > 0 => {
+                // Nested item: backspace un-nests it.
+                Some(Binding::Custom(Message::ChangeLevel {
+                    index,
+                    delta: -1,
+                }))
+            }
+            BlockKind::Quote(_)
+            | BlockKind::Bullet(_)
+            | BlockKind::Numbered(..)
+            | BlockKind::Todo(..) => {
+                // Top-level item: backspace removes the marker.
+                let text = block.content.text();
+                Some(Binding::Custom(Message::ConvertBlock {
+                    index,
+                    kind: BlockKind::Paragraph,
+                    content: text,
+                }))
+            }
+            _ if index > 0 => {
+                // At the very start: merge into the previous block.
+                Some(Binding::Custom(Message::MergeUp { index }))
+            }
+            _ => Binding::from_key_press(key_press),
+        }
+    }
+
+    /// The binding for the Enter key in a single-line block: the text after
+    /// the caret moves into a new block below, which continues list items and
+    /// quotes of the same kind. Entering an empty list item exits the list.
+    fn enter_binding(
+        index: usize,
+        block: &EditableBlock,
+    ) -> text_editor::Binding<Message> {
+        use cosmic::widget::text_editor::Binding;
+        let cursor = block.content.cursor();
+        let text = block.content.text();
+        let (before, after) = split_at(&text, cursor.position.column);
+        let continuation = match &block.kind {
+            BlockKind::Bullet(level) => Some(BlockKind::Bullet(*level)),
+            BlockKind::Numbered(level, number) => {
+                Some(BlockKind::Numbered(*level, *number))
+            }
+            BlockKind::Todo(level, done) => Some(BlockKind::Todo(*level, *done)),
+            BlockKind::Quote(level) => Some(BlockKind::Quote(*level)),
+            BlockKind::Paragraph
+            | BlockKind::Heading(_)
+            | BlockKind::Code(_)
+            | BlockKind::Divider => None,
+        };
+        if let Some(kind) = continuation {
+            if before.is_empty() && after.is_empty() {
+                // An empty item: Enter exits the list.
+                return Binding::Custom(Message::ConvertBlock {
+                    index,
+                    kind: BlockKind::Paragraph,
+                    content: String::new(),
+                });
+            }
+            return Binding::Custom(Message::SplitBlock {
+                index,
+                kind,
+                before,
+                after,
+            });
+        }
+        // Heading or paragraph: split into a paragraph.
+        Binding::Custom(Message::SplitBlock {
+            index,
+            kind: BlockKind::Paragraph,
+            before,
+            after,
+        })
+    }
+
+    /// The cursor positioned at the end of the block's content.
+    fn end_cursor(content: &text_editor::Content) -> text_editor::Cursor {
+        let line = content.line_count().saturating_sub(1);
+        let column = content.line(line).map_or(0, |l| l.text.len());
+        text_editor::Cursor {
+            position: text_editor::Position { line, column },
+            selection: None,
+        }
+    }
+
+    /// The nearest editable block before `index`, skipping dividers.
+    fn previous_editable(blocks: &[EditableBlock], index: usize) -> Option<usize> {
+        (0..index).rev().find(|&i| {
+            !matches!(blocks[i].kind, BlockKind::Divider)
+        })
+    }
+
+    /// The nearest editable block after `index`, skipping dividers.
+    fn next_editable(blocks: &[EditableBlock], index: usize) -> Option<usize> {
+        (index + 1..blocks.len()).find(|&i| {
+            !matches!(blocks[i].kind, BlockKind::Divider)
+        })
+    }
+
+    /// A task that focuses the block editor with the given index.
+    fn focus_block(index: usize) -> cosmic::Task<Message> {
+        cosmic::iced::runtime::task::widget(
+            cosmic::iced::runtime::core::widget::operation::focusable::focus(
+                cosmic::widget::Id::new(format!("block-{index}")),
+            ),
+        )
     }
 
     /// The actions shown next to the title: trash, or restore and delete.
@@ -1368,5 +1752,70 @@ impl menu::action::MenuAction for MenuAction {
             MenuAction::Save => Message::SaveNow,
             MenuAction::About => Message::ToggleContextPage(ContextPage::About),
         }
+    }
+}
+
+/// Splits the text at the given byte offset, clamped down to a character
+/// boundary so multi-byte characters are never cut in half.
+#[must_use]
+fn split_at(text: &str, column: usize) -> (String, String) {
+    let boundary = text.floor_char_boundary(column);
+    (text[..boundary].to_owned(), text[boundary..].to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{split_at, AppModel};
+    use crate::editor::BlockKind;
+
+    #[test]
+    fn split_at_clamps_to_char_boundaries() {
+        assert_eq!(
+            split_at("hello", 3),
+            ("hel".to_owned(), "lo".to_owned())
+        );
+        // The column is a byte offset: splitting inside a multi-byte char
+        // clamps down to the start of the char.
+        assert_eq!(
+            split_at("héllo", 1),
+            ("h".to_owned(), "éllo".to_owned())
+        );
+        assert_eq!(
+            split_at("héllo", 3),
+            ("hé".to_owned(), "llo".to_owned())
+        );
+        assert_eq!(split_at("hello", 99), ("hello".to_owned(), String::new()));
+        assert_eq!(split_at("", 0), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn shift_level_clamps_nesting() {
+        assert_eq!(
+            AppModel::shift_level(&BlockKind::Bullet(1), 1),
+            Some(BlockKind::Bullet(2))
+        );
+        assert_eq!(
+            AppModel::shift_level(&BlockKind::Bullet(0), -1),
+            Some(BlockKind::Bullet(0))
+        );
+        assert_eq!(
+            AppModel::shift_level(&BlockKind::Bullet(5), 5),
+            Some(BlockKind::Bullet(6))
+        );
+        assert_eq!(
+            AppModel::shift_level(&BlockKind::Todo(2, true), 1),
+            Some(BlockKind::Todo(3, true))
+        );
+        assert_eq!(
+            AppModel::shift_level(&BlockKind::Numbered(1, 4), -1),
+            Some(BlockKind::Numbered(0, 4))
+        );
+        assert_eq!(
+            AppModel::shift_level(&BlockKind::Quote(0), 1),
+            Some(BlockKind::Quote(1))
+        );
+        assert_eq!(AppModel::shift_level(&BlockKind::Paragraph, 1), None);
+        assert_eq!(AppModel::shift_level(&BlockKind::Heading(2), 1), None);
+        assert_eq!(AppModel::shift_level(&BlockKind::Divider, 1), None);
     }
 }
