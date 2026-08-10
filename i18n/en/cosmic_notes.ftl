@@ -57,3 +57,6 @@ divider = Divider
 bold = Bold
 italic = Italic
 inline-code = Inline code
+strikethrough = Strikethrough
+indent = Increase indentation
+outdent = Decrease indentation

@@ -179,6 +179,8 @@ pub enum InlineMarker {
     Italic,
     /// `` `code` ``
     Code,
+    /// `~~strikethrough~~`
+    Strikethrough,
 }
 
 impl InlineMarker {
@@ -188,6 +190,7 @@ impl InlineMarker {
             Self::Bold => ("**", "**"),
             Self::Italic => ("*", "*"),
             Self::Code => ("`", "`"),
+            Self::Strikethrough => ("~~", "~~"),
         }
     }
 }
@@ -1452,7 +1455,61 @@ impl AppModel {
             .get(index)
             .map_or(&BlockKind::Paragraph, |block| &block.kind);
 
-        let mut row = widget::row::with_capacity(14).spacing(spacing.space_xxs);
+        let mut row = Self::style_buttons(index, kind);
+        row = row.push(divider::vertical::default());
+        row = row.push(Self::inline_button(
+            index,
+            Self::toolbar_icon("format-text-bold-symbolic"),
+            InlineMarker::Bold,
+            fl!("bold"),
+        ));
+        row = row.push(Self::inline_button(
+            index,
+            Self::toolbar_icon("format-text-italic-symbolic"),
+            InlineMarker::Italic,
+            fl!("italic"),
+        ));
+        row = row.push(Self::inline_button(
+            index,
+            Self::toolbar_icon("format-text-strikethrough-symbolic"),
+            InlineMarker::Strikethrough,
+            fl!("strikethrough"),
+        ));
+        row = row.push(Self::inline_button(
+            index,
+            Self::toolbar_icon("format-text-code-symbolic"),
+            InlineMarker::Code,
+            fl!("inline-code"),
+        ));
+
+        row = row.push(divider::vertical::default());
+        row = row.push(Self::level_button(
+            index,
+            Self::toolbar_icon("format-indent-less-symbolic"),
+            -1,
+            fl!("outdent"),
+        ));
+        row = row.push(Self::level_button(
+            index,
+            Self::toolbar_icon("format-indent-more-symbolic"),
+            1,
+            fl!("indent"),
+        ));
+
+        widget::container(row)
+            .width(Length::Fill)
+            .padding([spacing.space_xxs, spacing.space_s])
+            .into()
+    }
+
+    /// The block-style conversion buttons for the selected block, with the
+    /// active style highlighted.
+    fn style_buttons(
+        index: usize,
+        kind: &BlockKind,
+    ) -> cosmic::widget::Row<'static, Message, cosmic::Theme, cosmic::Renderer> {
+        let spacing = cosmic::theme::spacing();
+        let mut row = widget::row::with_capacity(10).spacing(spacing.space_xxs);
         row = row.push(Self::style_button(
             index,
             *kind == BlockKind::Paragraph,
@@ -1524,30 +1581,7 @@ impl AppModel {
             fl!("divider"),
         ));
 
-        row = row.push(divider::vertical::default());
-        row = row.push(Self::inline_button(
-            index,
-            Self::toolbar_icon("format-text-bold-symbolic"),
-            InlineMarker::Bold,
-            fl!("bold"),
-        ));
-        row = row.push(Self::inline_button(
-            index,
-            Self::toolbar_icon("format-text-italic-symbolic"),
-            InlineMarker::Italic,
-            fl!("italic"),
-        ));
-        row = row.push(Self::inline_button(
-            index,
-            Self::toolbar_icon("format-text-code-symbolic"),
-            InlineMarker::Code,
-            fl!("inline-code"),
-        ));
-
-        widget::container(row)
-            .width(Length::Fill)
-            .padding([spacing.space_xxs, spacing.space_s])
-            .into()
+        row
     }
 
     /// A toolbar button that converts the selected block to the given kind.
@@ -1575,6 +1609,19 @@ impl AppModel {
     ) -> Element<'static, Message> {
         let button = button::icon(handle)
             .on_press(Message::WrapInline { index, marker })
+            .class(cosmic::theme::Button::Icon);
+        Self::tooltip(button.into(), label)
+    }
+
+    /// A toolbar button that shifts the nesting level of the selected block.
+    fn level_button(
+        index: usize,
+        handle: icon::Handle,
+        delta: i8,
+        label: String,
+    ) -> Element<'static, Message> {
+        let button = button::icon(handle)
+            .on_press(Message::ChangeLevel { index, delta })
             .class(cosmic::theme::Button::Icon);
         Self::tooltip(button.into(), label)
     }
@@ -1710,6 +1757,10 @@ impl AppModel {
                     Key::Character("k") => Some(Binding::Custom(Message::WrapInline {
                         index,
                         marker: InlineMarker::Code,
+                    })),
+                    Key::Character("x") => Some(Binding::Custom(Message::WrapInline {
+                        index,
+                        marker: InlineMarker::Strikethrough,
                     })),
                     _ => Binding::from_key_press(key_press),
                 }
