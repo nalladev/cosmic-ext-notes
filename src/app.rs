@@ -724,6 +724,7 @@ impl cosmic::Application for AppModel {
                         content: text_editor::Content::with_text(&after),
                     },
                 );
+                renumber_blocks(&mut self.blocks);
                 self.selected_block = index + 1;
                 self.mark_dirty();
                 Task::batch([
@@ -744,6 +745,7 @@ impl cosmic::Application for AppModel {
                 };
                 block.kind = kind;
                 block.content = text_editor::Content::with_text(&content);
+                renumber_blocks(&mut self.blocks);
                 self.mark_dirty();
                 self.update_title()
             }
@@ -758,6 +760,7 @@ impl cosmic::Application for AppModel {
                     return Task::none();
                 };
                 block.kind = kind;
+                renumber_blocks(&mut self.blocks);
                 self.mark_dirty();
                 self.update_title()
             }
@@ -775,6 +778,7 @@ impl cosmic::Application for AppModel {
                 prev.content = text_editor::Content::with_text(&text);
                 let cursor = Self::end_cursor(&prev.content);
                 prev.content.move_to(cursor);
+                renumber_blocks(&mut self.blocks);
                 self.selected_block = index - 1;
                 self.mark_dirty();
                 Task::batch([
@@ -2054,6 +2058,7 @@ impl AppModel {
         let caret = index + caret_in_replacement;
         self.push_undo_step();
         self.blocks.splice(index..=index, replacement);
+        renumber_blocks(&mut self.blocks);
         self.selected_block = caret;
         if let Some(block) = self.blocks.get_mut(caret) {
             let cursor = Self::end_cursor(&block.content);
@@ -2142,6 +2147,7 @@ impl AppModel {
         let text = block.content.text();
         block.kind = kind;
         block.content = text_editor::Content::with_text(if is_divider { "" } else { &text });
+        renumber_blocks(&mut self.blocks);
         self.mark_dirty();
         if !is_divider {
             return Self::focus_block(index).map(cosmic::action::app);
@@ -2400,6 +2406,25 @@ fn paste_blocks(
     (blocks, caret)
 }
 
+/// Re-numbers every consecutive run of ordered list items so each run
+/// starts at 1 and increments by one, matching how Futo displays lists.
+/// Runs are reset by any non-numbered block or a level change.
+fn renumber_blocks(blocks: &mut [EditableBlock]) {
+    let mut previous: Option<(u8, u32)> = None;
+    for block in blocks {
+        match &mut block.kind {
+            BlockKind::Numbered(level, number) => {
+                *number = match previous {
+                    Some((prev_level, prev_number)) if prev_level == *level => prev_number + 1,
+                    _ => 1,
+                };
+                previous = Some((*level, *number));
+            }
+            _ => previous = None,
+        }
+    }
+}
+
 /// Splits the text at the given byte offset, clamped down to a character
 /// boundary so multi-byte characters are never cut in half.
 #[must_use]
@@ -2410,7 +2435,7 @@ fn split_at(text: &str, column: usize) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppModel, UNDO_COALESCE, paste_blocks, split_at};
+    use super::{AppModel, EditableBlock, UNDO_COALESCE, paste_blocks, renumber_blocks, split_at};
     use crate::editor::{self, BlockKind};
     use std::time::Instant;
 
@@ -2506,5 +2531,43 @@ mod tests {
         let text: Vec<_> = blocks.iter().map(|b| b.content.text()).collect();
         assert_eq!(text, vec!["a", "Z", "ef"]);
         assert_eq!(caret, 1);
+    }
+
+    #[test]
+    fn renumber_blocks_sequences_each_list_run() {
+        let mut blocks = vec![
+            EditableBlock::from_block(editor::Block::paragraph("intro")),
+            EditableBlock::from_block(editor::Block {
+                kind: BlockKind::Numbered(0, 7),
+                content: "a".to_owned(),
+            }),
+            EditableBlock::from_block(editor::Block {
+                kind: BlockKind::Numbered(0, 9),
+                content: "b".to_owned(),
+            }),
+            EditableBlock::from_block(editor::Block::paragraph("gap")),
+            EditableBlock::from_block(editor::Block {
+                kind: BlockKind::Numbered(1, 3),
+                content: "c".to_owned(),
+            }),
+            EditableBlock::from_block(editor::Block {
+                kind: BlockKind::Numbered(1, 5),
+                content: "d".to_owned(),
+            }),
+            EditableBlock::from_block(editor::Block {
+                kind: BlockKind::Numbered(0, 99),
+                content: "e".to_owned(),
+            }),
+        ];
+        renumber_blocks(&mut blocks);
+        let numbers: Vec<_> = blocks
+            .iter()
+            .map(|block| match &block.kind {
+                BlockKind::Numbered(_, number) => *number,
+                _ => 0,
+            })
+            .collect();
+        // Each run starts at 1; a level change resets the run.
+        assert_eq!(numbers, vec![0, 1, 2, 0, 1, 2, 1]);
     }
 }
