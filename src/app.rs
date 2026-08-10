@@ -781,13 +781,22 @@ impl cosmic::Application for AppModel {
                     return Task::none();
                 };
                 // Code and divider blocks keep their own layout; inline
-                // formatting only applies to single-line content.
+                // formatting only applies to regular content.
                 if matches!(block.kind, BlockKind::Code(_) | BlockKind::Divider) {
                     return Task::none();
                 }
                 let (open, close) = marker.delimiters();
-                let text = block.content.text();
                 let cursor = block.content.cursor();
+                // Wrap the caret's line in place: `Position::column` is an
+                // offset within the line, so operating on the line avoids
+                // mixing up offsets across line breaks.
+                let line_index = cursor
+                    .position
+                    .line
+                    .min(block.content.line_count().saturating_sub(1));
+                let Some(line) = block.content.line(line_index) else {
+                    return Task::none();
+                };
                 // Only a selection within the caret's line can be wrapped in
                 // place; anything else inserts the markers at the caret.
                 let selection = cursor.selection.and_then(|anchor| {
@@ -795,11 +804,17 @@ impl cosmic::Application for AppModel {
                         .then_some((anchor.column, cursor.position.column))
                 });
                 let result =
-                    editor::wrap_inline(&text, selection, cursor.position.column, open, close);
-                block.content = text_editor::Content::with_text(&result.text);
+                    editor::wrap_inline(&line.text, selection, cursor.position.column, open, close);
+                let mut lines: Vec<String> = block
+                    .content
+                    .lines()
+                    .map(|line| line.text.into_owned())
+                    .collect();
+                lines[line_index] = result.text;
+                block.content = text_editor::Content::with_text(&lines.join("\n"));
                 block.content.move_to(text_editor::Cursor {
                     position: text_editor::Position {
-                        line: cursor.position.line,
+                        line: line_index,
                         column: result.caret,
                     },
                     selection: None,
