@@ -550,7 +550,12 @@ impl cosmic::Application for AppModel {
                 } else {
                     self.selected = Some(path);
                 }
-                Task::batch([save, self.update_title()])
+                // Drop straight into the first block, like Futo does.
+                Task::batch([
+                    save,
+                    Self::focus_block(0).map(cosmic::action::app),
+                    self.update_title(),
+                ])
             }
 
             Message::NewNote => self.new_note(),
