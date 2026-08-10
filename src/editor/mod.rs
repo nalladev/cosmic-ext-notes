@@ -46,6 +46,23 @@ pub struct Block {
     pub content: String,
 }
 
+impl BlockKind {
+    /// The list/quote nesting level of the block, if any.
+    #[must_use]
+    pub fn level(&self) -> u8 {
+        match self {
+            Self::Quote(level)
+            | Self::Bullet(level)
+            | Self::Numbered(level, _)
+            | Self::Todo(level, _) => *level,
+            Self::Paragraph
+            | Self::Heading(_)
+            | Self::Code(_)
+            | Self::Divider => 0,
+        }
+    }
+}
+
 impl Block {
     /// Creates a plain paragraph block.
     #[must_use]
@@ -117,27 +134,6 @@ impl Block {
             kind: BlockKind::Divider,
             content: String::new(),
         }
-    }
-
-    /// The list/quote nesting level of the block, if any.
-    #[must_use]
-    pub fn level(&self) -> u8 {
-        match self.kind {
-            BlockKind::Quote(level)
-            | BlockKind::Bullet(level)
-            | BlockKind::Numbered(level, _)
-            | BlockKind::Todo(level, _) => level,
-            BlockKind::Paragraph
-            | BlockKind::Heading(_)
-            | BlockKind::Code(_)
-            | BlockKind::Divider => 0,
-        }
-    }
-
-    /// Whether this is a fenced code block.
-    #[must_use]
-    pub fn is_code(&self) -> bool {
-        matches!(self.kind, BlockKind::Code(_))
     }
 }
 
@@ -430,7 +426,7 @@ fn quote_prefix(line: &str) -> Option<(usize, &str)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_markdown, serialize_markdown, Block};
+    use super::{parse_markdown, serialize_markdown, Block, BlockKind};
 
     /// Asserts that parsing and re-serializing is the identity for text that
     /// is already in canonical markdown form.
@@ -722,14 +718,14 @@ mod tests {
     }
 
     #[test]
-    fn block_level_reports_nesting() {
-        assert_eq!(Block::bullet(2, "x").level(), 2);
-        assert_eq!(Block::numbered(1, 4, "x").level(), 1);
-        assert_eq!(Block::todo(3, false, "x").level(), 3);
-        assert_eq!(Block::quote(1, "x").level(), 1);
-        assert_eq!(Block::paragraph("x").level(), 0);
-        assert_eq!(Block::heading(2, "x").level(), 0);
-        assert_eq!(Block::code("", "x").level(), 0);
-        assert_eq!(Block::divider().level(), 0);
+    fn block_kind_level_reports_nesting() {
+        assert_eq!(BlockKind::Bullet(2).level(), 2);
+        assert_eq!(BlockKind::Numbered(1, 4).level(), 1);
+        assert_eq!(BlockKind::Todo(3, false).level(), 3);
+        assert_eq!(BlockKind::Quote(1).level(), 1);
+        assert_eq!(BlockKind::Paragraph.level(), 0);
+        assert_eq!(BlockKind::Heading(2).level(), 0);
+        assert_eq!(BlockKind::Code(String::new()).level(), 0);
+        assert_eq!(BlockKind::Divider.level(), 0);
     }
 }

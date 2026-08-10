@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use crate::config::Config;
+use crate::editor::{self, BlockKind};
 use crate::fl;
 use crate::notes::{self, Note, SaveOutcome, Vault};
 use cosmic::app::context_drawer;
@@ -48,8 +49,8 @@ pub struct AppModel {
     vault: Vault,
     /// The note currently open in the editor, if any.
     selected: Option<PathBuf>,
-    /// The text editor buffer for the active note.
-    editor: text_editor::Content,
+    /// The blocks of the active note, each with an editable text buffer.
+    blocks: Vec<EditableBlock>,
     /// The title being edited for the active note.
     title_draft: String,
     /// Whether the editor has unsaved changes.
@@ -100,8 +101,14 @@ pub enum Message {
     ConfirmDialog,
     /// Dismiss the confirmation dialog without acting.
     DismissDialog,
-    /// An action was performed in the text editor.
-    Edit(text_editor::Action),
+    /// An action was performed in the text editor of the block with the given
+    /// index.
+    BlockAction {
+        index: usize,
+        action: text_editor::Action,
+    },
+    /// Toggle the checked state of the todo block with the given index.
+    ToggleTodo(usize),
     /// Toggle between the editor and the markdown preview.
     TogglePreview,
     /// A link was clicked in the markdown preview.
@@ -147,10 +154,37 @@ impl Shortcut {
 /// A pending destructive action awaiting confirmation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Confirm {
-    /// Permanently delete the note at the given path.
+    /// Permanently delete the note with the given path.
     Delete(PathBuf),
     /// Permanently delete all trashed notes.
     EmptyTrash,
+}
+
+/// A block rendered in the editor: the block kind plus the editable text
+/// buffer, which keeps the cursor and selection state between frames.
+struct EditableBlock {
+    /// What kind of block this is.
+    kind: BlockKind,
+    /// The editable text buffer for the block content.
+    content: text_editor::Content,
+}
+
+impl EditableBlock {
+    /// Builds an editable block from a pure model block.
+    fn from_block(block: editor::Block) -> Self {
+        Self {
+            kind: block.kind,
+            content: text_editor::Content::with_text(&block.content),
+        }
+    }
+
+    /// Converts this editable block back into a pure model block.
+    fn to_block(&self) -> editor::Block {
+        editor::Block {
+            kind: self.kind.clone(),
+            content: self.content.text(),
+        }
+    }
 }
 
 /// Create a COSMIC application from the app model
@@ -225,7 +259,7 @@ impl cosmic::Application for AppModel {
             config,
             vault,
             selected: None,
-            editor: text_editor::Content::new(),
+            blocks: Vec::new(),
             title_draft: String::new(),
             dirty: false,
             preview: false,
@@ -538,10 +572,26 @@ impl cosmic::Application for AppModel {
                 Task::none()
             }
 
-            Message::Edit(action) => {
+            Message::BlockAction { index, action } => {
                 let is_edit = action.is_edit();
-                self.editor.perform(action);
+                let Some(block) = self.blocks.get_mut(index) else {
+                    return Task::none();
+                };
+                block.content.perform(action);
                 if is_edit {
+                    self.dirty = true;
+                    let text = self.editor_text();
+                    self.markdown = Some(markdown::Content::parse(&text));
+                }
+                self.update_title()
+            }
+
+            Message::ToggleTodo(index) => {
+                let Some(block) = self.blocks.get_mut(index) else {
+                    return Task::none();
+                };
+                if let BlockKind::Todo(_, done) = &mut block.kind {
+                    *done = !*done;
                     self.dirty = true;
                     let text = self.editor_text();
                     self.markdown = Some(markdown::Content::parse(&text));
@@ -625,9 +675,10 @@ impl AppModel {
         self.vault.notes().iter().find(|note| note.path() == path)
     }
 
-    /// The current text of the editor.
+    /// The current markdown text of the editor, serialized from its blocks.
     fn editor_text(&self) -> String {
-        self.editor.text()
+        let blocks: Vec<editor::Block> = self.blocks.iter().map(EditableBlock::to_block).collect();
+        editor::serialize_markdown(&blocks)
     }
 
     /// Loads the given note into the editor.
@@ -640,7 +691,16 @@ impl AppModel {
 
     /// Loads the given body, title, and preview preference into the editor.
     fn load_body(&mut self, body: &str, title: &str, preview: bool) {
-        self.editor = text_editor::Content::with_text(body);
+        let mut blocks: Vec<EditableBlock> = editor::parse_markdown(body)
+            .into_iter()
+            .map(EditableBlock::from_block)
+            .collect();
+        // An empty note still gets one empty block so the editor has a
+        // focusable surface that shows the placeholder.
+        if blocks.is_empty() {
+            blocks.push(EditableBlock::from_block(editor::Block::paragraph("")));
+        }
+        self.blocks = blocks;
         title.clone_into(&mut self.title_draft);
         self.preview = preview;
         self.dirty = false;
@@ -649,7 +709,7 @@ impl AppModel {
 
     /// Empties the editor and clears the title.
     fn clear_editor(&mut self) {
-        self.editor = text_editor::Content::new();
+        self.blocks.clear();
         self.title_draft.clear();
         self.dirty = false;
         self.markdown = None;
@@ -982,19 +1042,7 @@ impl AppModel {
             .height(Length::Fill)
             .into()
         } else {
-            let theme = if cosmic::theme::active_type().is_dark() {
-                cosmic::iced::highlighter::Theme::SolarizedDark
-            } else {
-                cosmic::iced::highlighter::Theme::InspiredGitHub
-            };
-            cosmic::widget::text_editor(&self.editor)
-                .on_action(Message::Edit)
-                .placeholder(fl!("note-placeholder"))
-                .highlight("markdown", theme)
-                .size(15)
-                .padding([spacing.space_s, spacing.space_s])
-                .height(Length::Fill)
-                .into()
+            self.block_editor()
         };
 
         widget::column::with_capacity(2)
@@ -1003,6 +1051,136 @@ impl AppModel {
             .push(body)
             .width(Length::Fill)
             .height(Length::Fill)
+            .into()
+    }
+
+    /// The block editor: a scrollable column of per-block text editors.
+    fn block_editor(&self) -> Element<'_, Message> {
+        let spacing = cosmic::theme::spacing();
+        let mut column = widget::column::with_capacity(self.blocks.len());
+        for (index, block) in self.blocks.iter().enumerate() {
+            column = column.push(Self::block_element(index, block));
+        }
+        widget::scrollable(
+            widget::container(column.spacing(0))
+                .padding([spacing.space_s, spacing.space_s])
+                .width(Length::Fill),
+        )
+        .height(Length::Fill)
+        .into()
+    }
+
+    /// Renders a single block as an editable widget.
+    fn block_element(index: usize, block: &EditableBlock) -> Element<'_, Message> {
+        let spacing = cosmic::theme::spacing();
+        let mut editor = cosmic::widget::text_editor(&block.content)
+            .on_action(move |action| Message::BlockAction { index, action })
+            .highlight("markdown", Self::highlight_theme())
+            .size(15)
+            .padding([spacing.space_xxs, 0]);
+        if index == 0 {
+            editor = editor.placeholder(fl!("note-placeholder"));
+        }
+        match &block.kind {
+            BlockKind::Paragraph => editor.into(),
+            BlockKind::Heading(level) => editor
+                .font(cosmic::font::semibold())
+                .size(Self::heading_size(*level))
+                .into(),
+            BlockKind::Quote(_level) => widget::row::with_capacity(2)
+                .push(Self::quote_stripe())
+                .push(editor)
+                .align_y(Alignment::Center)
+                .into(),
+            BlockKind::Bullet(_level) => {
+                Self::list_item(Self::indent(block.kind.level()), "•", editor)
+            }
+            BlockKind::Numbered(_level, number) => Self::list_item(
+                Self::indent(block.kind.level()),
+                number.to_string(),
+                editor,
+            ),
+            BlockKind::Todo(_level, done) => {
+                let checkbox = cosmic::widget::checkbox(*done)
+                    .size(16)
+                    .on_toggle(move |_| Message::ToggleTodo(index));
+                widget::row::with_capacity(3)
+                    .push(widget::text(Self::indent(block.kind.level())))
+                    .push(checkbox)
+                    .push(editor)
+                    .align_y(Alignment::Center)
+                    .into()
+            }
+            BlockKind::Code(_lang) => {
+                widget::container(editor.font(cosmic::font::mono()))
+                    .class(cosmic::theme::Container::Card)
+                    .padding([spacing.space_xxs, spacing.space_xs])
+                    .width(Length::Fill)
+                    .into()
+            }
+            BlockKind::Divider => widget::container(divider::horizontal::default())
+                .padding([spacing.space_s, 0])
+                .width(Length::Fill)
+                .into(),
+        }
+    }
+
+    /// Renders a list marker followed by the block's editor.
+    fn list_item<'a, E>(
+        indent: String,
+        marker: impl Into<String>,
+        editor: E,
+    ) -> Element<'a, Message>
+    where
+        E: Into<Element<'a, Message>>,
+    {
+        let mut label = indent;
+        label.push_str(&marker.into());
+        widget::row::with_capacity(2)
+            .push(widget::text(label))
+            .push(editor)
+            .align_y(Alignment::Center)
+            .into()
+    }
+
+    /// The indentation prefix for a nesting level (two spaces per level).
+    #[must_use]
+    fn indent(level: u8) -> String {
+        "  ".repeat(usize::from(level))
+    }
+
+    /// The font size for a heading of the given level.
+    #[must_use]
+    fn heading_size(level: u8) -> f32 {
+        match level {
+            1 => 24.0,
+            2 => 21.0,
+            3 => 18.0,
+            4 => 16.0,
+            _ => 15.0,
+        }
+    }
+
+    /// The syntax highlighting theme for the current color scheme.
+    #[must_use]
+    fn highlight_theme() -> cosmic::iced::highlighter::Theme {
+        if cosmic::theme::active_type().is_dark() {
+            cosmic::iced::highlighter::Theme::SolarizedDark
+        } else {
+            cosmic::iced::highlighter::Theme::InspiredGitHub
+        }
+    }
+
+    /// A thin vertical accent stripe used as the quote block marker.
+    fn quote_stripe() -> Element<'static, Message> {
+        let mut color: cosmic::iced::Color =
+            cosmic::theme::active().cosmic().accent.base.into();
+        color.a = 0.6;
+        widget::container(widget::space().width(Length::Fixed(3.0)).height(Length::Fill))
+            .style(move |_theme| cosmic::iced::widget::container::Style {
+                background: Some(cosmic::iced::Background::Color(color)),
+                ..Default::default()
+            })
             .into()
     }
 
