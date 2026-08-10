@@ -51,6 +51,8 @@ pub struct AppModel {
     selected: Option<PathBuf>,
     /// The blocks of the active note, each with an editable text buffer.
     blocks: Vec<EditableBlock>,
+    /// The index of the block the toolbar acts on (the last one focused).
+    selected_block: usize,
     /// The title being edited for the active note.
     title_draft: String,
     /// Whether the editor has unsaved changes.
@@ -140,6 +142,20 @@ pub enum Message {
     /// Move focus to the editable block after the given index, placing the
     /// caret at its start.
     FocusNext(usize),
+    /// Convert the block at the given index to the given kind, keeping its
+    /// text when the kind has one (toolbar block-style buttons).
+    FormatBlock {
+        index: usize,
+        kind: BlockKind,
+    },
+    /// Wrap the block's selection with the given inline markdown markers.
+    WrapInline {
+        index: usize,
+        marker: InlineMarker,
+    },
+    /// Convert the block into a divider and move focus below it (typed
+    /// `---` followed by Enter).
+    InsertDivider(usize),
     /// Toggle between the editor and the markdown preview.
     TogglePreview,
     /// A link was clicked in the markdown preview.
@@ -150,6 +166,30 @@ pub enum Message {
     SaveNow,
     /// A message that does nothing.
     Ignored,
+}
+
+/// Inline markdown formatting applied to a block's selection by the toolbar.
+/// The markers are inserted as visible characters; this editor has no rich
+/// text spans, so the raw markdown stays in the buffer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InlineMarker {
+    /// `**bold**`
+    Bold,
+    /// `*italic*`
+    Italic,
+    /// `` `code` ``
+    Code,
+}
+
+impl InlineMarker {
+    /// The delimiters that open and close this marker.
+    fn delimiters(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Bold => ("**", "**"),
+            Self::Italic => ("*", "*"),
+            Self::Code => ("`", "`"),
+        }
+    }
 }
 
 /// Keyboard shortcuts handled by the application.
@@ -291,6 +331,7 @@ impl cosmic::Application for AppModel {
             vault,
             selected: None,
             blocks: Vec::new(),
+            selected_block: 0,
             title_draft: String::new(),
             dirty: false,
             preview: false,
@@ -604,6 +645,7 @@ impl cosmic::Application for AppModel {
             }
 
             Message::BlockAction { index, action } => {
+                self.selected_block = index;
                 let is_edit = action.is_edit();
                 let Some(block) = self.blocks.get_mut(index) else {
                     return Task::none();
@@ -616,6 +658,7 @@ impl cosmic::Application for AppModel {
             }
 
             Message::ToggleTodo(index) => {
+                self.selected_block = index;
                 let Some(block) = self.blocks.get_mut(index) else {
                     return Task::none();
                 };
@@ -643,6 +686,7 @@ impl cosmic::Application for AppModel {
                         content: text_editor::Content::with_text(&after),
                     },
                 );
+                self.selected_block = index + 1;
                 self.mark_dirty();
                 Task::batch([
                     Self::focus_block(index + 1).map(cosmic::action::app),
@@ -655,6 +699,7 @@ impl cosmic::Application for AppModel {
                 kind,
                 content,
             } => {
+                self.selected_block = index;
                 let Some(block) = self.blocks.get_mut(index) else {
                     return Task::none();
                 };
@@ -665,6 +710,7 @@ impl cosmic::Application for AppModel {
             }
 
             Message::ChangeLevel { index, delta } => {
+                self.selected_block = index;
                 let Some(block) = self.blocks.get_mut(index) else {
                     return Task::none();
                 };
@@ -688,6 +734,7 @@ impl cosmic::Application for AppModel {
                 prev.content = text_editor::Content::with_text(&text);
                 let cursor = Self::end_cursor(&prev.content);
                 prev.content.move_to(cursor);
+                self.selected_block = index - 1;
                 self.mark_dirty();
                 Task::batch([
                     Self::focus_block(index - 1).map(cosmic::action::app),
@@ -699,6 +746,7 @@ impl cosmic::Application for AppModel {
                 let Some(target) = Self::previous_editable(&self.blocks, index) else {
                     return Task::none();
                 };
+                self.selected_block = target;
                 let Some(block) = self.blocks.get_mut(target) else {
                     return Task::none();
                 };
@@ -711,6 +759,7 @@ impl cosmic::Application for AppModel {
                 let Some(target) = Self::next_editable(&self.blocks, index) else {
                     return Task::none();
                 };
+                self.selected_block = target;
                 let Some(block) = self.blocks.get_mut(target) else {
                     return Task::none();
                 };
@@ -719,6 +768,55 @@ impl cosmic::Application for AppModel {
                     selection: None,
                 });
                 Self::focus_block(target).map(cosmic::action::app)
+            }
+
+            Message::FormatBlock { index, kind } => {
+                self.selected_block = index;
+                Task::batch([self.format_block(index, kind), self.update_title()])
+            }
+
+            Message::WrapInline { index, marker } => {
+                self.selected_block = index;
+                let Some(block) = self.blocks.get_mut(index) else {
+                    return Task::none();
+                };
+                // Code and divider blocks keep their own layout; inline
+                // formatting only applies to single-line content.
+                if matches!(block.kind, BlockKind::Code(_) | BlockKind::Divider) {
+                    return Task::none();
+                }
+                let (open, close) = marker.delimiters();
+                let text = block.content.text();
+                let cursor = block.content.cursor();
+                // Only a selection within the caret's line can be wrapped in
+                // place; anything else inserts the markers at the caret.
+                let selection = cursor.selection.and_then(|anchor| {
+                    (anchor.line == cursor.position.line)
+                        .then_some((anchor.column, cursor.position.column))
+                });
+                let result =
+                    editor::wrap_inline(&text, selection, cursor.position.column, open, close);
+                block.content = text_editor::Content::with_text(&result.text);
+                block.content.move_to(text_editor::Cursor {
+                    position: text_editor::Position {
+                        line: cursor.position.line,
+                        column: result.caret,
+                    },
+                    selection: None,
+                });
+                self.mark_dirty();
+                Task::batch([
+                    Self::focus_block(index).map(cosmic::action::app),
+                    self.update_title(),
+                ])
+            }
+
+            Message::InsertDivider(index) => {
+                self.selected_block = index;
+                Task::batch([
+                    self.format_block(index, BlockKind::Divider),
+                    self.update_title(),
+                ])
             }
 
             Message::TogglePreview => {
@@ -831,6 +929,7 @@ impl AppModel {
             blocks.push(EditableBlock::from_block(editor::Block::paragraph("")));
         }
         self.blocks = blocks;
+        self.selected_block = 0;
         title.clone_into(&mut self.title_draft);
         self.preview = preview;
         self.dirty = false;
@@ -1175,9 +1274,13 @@ impl AppModel {
             self.block_editor()
         };
 
-        widget::column::with_capacity(2)
+        let mut column = widget::column::with_capacity(4)
             .push(widget::container(header).padding([spacing.space_s, spacing.space_s]))
-            .push(divider::horizontal::default())
+            .push(divider::horizontal::default());
+        if !self.preview {
+            column = column.push(self.block_toolbar());
+        }
+        column
             .push(body)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -1320,6 +1423,187 @@ impl AppModel {
                 ..Default::default()
             })
             .into()
+    }
+
+    /// The formatting toolbar for the selected block: block-style conversions
+    /// and inline markdown wrapping. The active style is highlighted.
+    fn block_toolbar(&self) -> Element<'_, Message> {
+        let spacing = cosmic::theme::spacing();
+        let index = self.selected_block.min(self.blocks.len().saturating_sub(1));
+        let kind = self
+            .blocks
+            .get(index)
+            .map_or(&BlockKind::Paragraph, |block| &block.kind);
+
+        let mut row = widget::row::with_capacity(14).spacing(spacing.space_xxs);
+        row = row.push(Self::style_button(
+            index,
+            *kind == BlockKind::Paragraph,
+            Self::toolbar_icon("format-justify-left-symbolic"),
+            BlockKind::Paragraph,
+            fl!("paragraph"),
+        ));
+        row = row.push(Self::style_button(
+            index,
+            *kind == BlockKind::Heading(1),
+            Self::toolbar_icon("format-text-heading-1-symbolic"),
+            BlockKind::Heading(1),
+            fl!("heading-1"),
+        ));
+        row = row.push(Self::style_button(
+            index,
+            *kind == BlockKind::Heading(2),
+            Self::toolbar_icon("format-text-heading-2-symbolic"),
+            BlockKind::Heading(2),
+            fl!("heading-2"),
+        ));
+        row = row.push(Self::style_button(
+            index,
+            *kind == BlockKind::Heading(3),
+            Self::toolbar_icon("format-text-heading-3-symbolic"),
+            BlockKind::Heading(3),
+            fl!("heading-3"),
+        ));
+        row = row.push(Self::style_button(
+            index,
+            *kind == BlockKind::Bullet(0),
+            Self::toolbar_icon("format-list-unordered-symbolic"),
+            BlockKind::Bullet(0),
+            fl!("bullet-list"),
+        ));
+        row = row.push(Self::style_button(
+            index,
+            *kind == BlockKind::Numbered(0, 1),
+            Self::toolbar_icon("format-list-ordered-symbolic"),
+            BlockKind::Numbered(0, 1),
+            fl!("numbered-list"),
+        ));
+        row = row.push(Self::style_button(
+            index,
+            matches!(kind, BlockKind::Todo(..)),
+            Self::toolbar_icon("format-list-checkbox-symbolic"),
+            BlockKind::Todo(0, false),
+            fl!("todo-list"),
+        ));
+        row = row.push(Self::style_button(
+            index,
+            matches!(kind, BlockKind::Quote(_)),
+            Self::toolbar_icon("format-quote-block-symbolic"),
+            BlockKind::Quote(0),
+            fl!("quote"),
+        ));
+        row = row.push(Self::style_button(
+            index,
+            matches!(kind, BlockKind::Code(_)),
+            Self::toolbar_icon("format-text-code-symbolic"),
+            BlockKind::Code(String::new()),
+            fl!("code-block"),
+        ));
+        row = row.push(Self::style_button(
+            index,
+            *kind == BlockKind::Divider,
+            Self::toolbar_icon("insert-horizontal-rule-symbolic"),
+            BlockKind::Divider,
+            fl!("divider"),
+        ));
+
+        row = row.push(divider::vertical::default());
+        row = row.push(Self::inline_button(
+            index,
+            Self::toolbar_icon("format-text-bold-symbolic"),
+            InlineMarker::Bold,
+            fl!("bold"),
+        ));
+        row = row.push(Self::inline_button(
+            index,
+            Self::toolbar_icon("format-text-italic-symbolic"),
+            InlineMarker::Italic,
+            fl!("italic"),
+        ));
+        row = row.push(Self::inline_button(
+            index,
+            Self::toolbar_icon("format-text-code-symbolic"),
+            InlineMarker::Code,
+            fl!("inline-code"),
+        ));
+
+        widget::container(row)
+            .width(Length::Fill)
+            .padding([spacing.space_xxs, spacing.space_s])
+            .into()
+    }
+
+    /// A toolbar button that converts the selected block to the given kind.
+    fn style_button(
+        index: usize,
+        active: bool,
+        handle: icon::Handle,
+        kind: BlockKind,
+        label: String,
+    ) -> Element<'static, Message> {
+        let button = button::icon(handle)
+            .on_press(Message::FormatBlock { index, kind })
+            .selected(active)
+            .class(cosmic::theme::Button::Icon);
+        Self::tooltip(button.into(), label)
+    }
+
+    /// A toolbar button that wraps the selected block's selection in the
+    /// given inline markdown markers.
+    fn inline_button(
+        index: usize,
+        handle: icon::Handle,
+        marker: InlineMarker,
+        label: String,
+    ) -> Element<'static, Message> {
+        let button = button::icon(handle)
+            .on_press(Message::WrapInline { index, marker })
+            .class(cosmic::theme::Button::Icon);
+        Self::tooltip(button.into(), label)
+    }
+
+    /// Loads a toolbar icon, using bundled SVGs for glyphs that the icon
+    /// theme does not provide (headings, lists, quote, code, divider).
+    fn toolbar_icon(name: &'static str) -> icon::Handle {
+        match name {
+            "format-text-heading-1-symbolic" => icon::from_svg_bytes(include_bytes!(
+                "../resources/icons/format-text-heading-1-symbolic.svg"
+            ))
+            .symbolic(true),
+            "format-text-heading-2-symbolic" => icon::from_svg_bytes(include_bytes!(
+                "../resources/icons/format-text-heading-2-symbolic.svg"
+            ))
+            .symbolic(true),
+            "format-text-heading-3-symbolic" => icon::from_svg_bytes(include_bytes!(
+                "../resources/icons/format-text-heading-3-symbolic.svg"
+            ))
+            .symbolic(true),
+            "format-list-unordered-symbolic" => icon::from_svg_bytes(include_bytes!(
+                "../resources/icons/format-list-unordered-symbolic.svg"
+            ))
+            .symbolic(true),
+            "format-list-ordered-symbolic" => icon::from_svg_bytes(include_bytes!(
+                "../resources/icons/format-list-ordered-symbolic.svg"
+            ))
+            .symbolic(true),
+            "format-list-checkbox-symbolic" => icon::from_svg_bytes(include_bytes!(
+                "../resources/icons/format-list-checkbox-symbolic.svg"
+            ))
+            .symbolic(true),
+            "format-quote-block-symbolic" => icon::from_svg_bytes(include_bytes!(
+                "../resources/icons/format-quote-block-symbolic.svg"
+            ))
+            .symbolic(true),
+            "format-text-code-symbolic" => icon::from_svg_bytes(include_bytes!(
+                "../resources/icons/format-text-code-symbolic.svg"
+            ))
+            .symbolic(true),
+            "insert-horizontal-rule-symbolic" => icon::from_svg_bytes(include_bytes!(
+                "../resources/icons/insert-horizontal-rule-symbolic.svg"
+            ))
+            .symbolic(true),
+            _ => icon::from_name(name).handle(),
+        }
     }
 
     /// Maps a key press in a block's editor to a block-level behavior, falling
@@ -1497,6 +1781,11 @@ impl AppModel {
         use cosmic::widget::text_editor::Binding;
         let cursor = block.content.cursor();
         let text = block.content.text();
+        // Typing a divider marker (`---`, `***`, `___`) and pressing Enter
+        // inserts a divider and moves the caret below it.
+        if matches!(block.kind, BlockKind::Paragraph) && editor::is_divider(&text) {
+            return Binding::Custom(Message::InsertDivider(index));
+        }
         let (before, after) = split_at(&text, cursor.position.column);
         let continuation = match &block.kind {
             BlockKind::Bullet(level) => Some(BlockKind::Bullet(*level)),
@@ -1566,6 +1855,40 @@ impl AppModel {
                 cosmic::widget::Id::new(format!("block-{index}")),
             ),
         )
+    }
+
+    /// Converts the block at `index` to `kind`, keeping its text (dividers
+    /// drop it), and returns a task that moves focus back into the document:
+    /// the converted block, or the next editable block after a divider
+    /// (inserting an empty paragraph when there is nowhere to type).
+    fn format_block(
+        &mut self,
+        index: usize,
+        kind: BlockKind,
+    ) -> Task<cosmic::Action<Message>> {
+        let Some(block) = self.blocks.get_mut(index) else {
+            return Task::none();
+        };
+        if block.kind == kind {
+            return Task::none();
+        }
+        let is_divider = matches!(kind, BlockKind::Divider);
+        let text = block.content.text();
+        block.kind = kind;
+        block.content = text_editor::Content::with_text(if is_divider { "" } else { &text });
+        self.mark_dirty();
+        if !is_divider {
+            return Self::focus_block(index).map(cosmic::action::app);
+        }
+        if let Some(next) = Self::next_editable(&self.blocks, index) {
+            return Self::focus_block(next).map(cosmic::action::app);
+        }
+        let next = index + 1;
+        self.blocks.insert(
+            next,
+            EditableBlock::from_block(editor::Block::paragraph("")),
+        );
+        Self::focus_block(next).map(cosmic::action::app)
     }
 
     /// The actions shown next to the title: trash, or restore and delete.

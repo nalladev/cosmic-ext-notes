@@ -316,7 +316,7 @@ fn parse_code_fence(all_lines: &[&str], i: &mut usize, fence: char, lang: String
 }
 
 /// Whether the line is a thematic break (`---`, `***`, or `___`).
-fn is_divider(line: &str) -> bool {
+pub(crate) fn is_divider(line: &str) -> bool {
     let mut chars = line.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -424,6 +424,55 @@ fn quote_prefix(line: &str) -> Option<(usize, &str)> {
     Some((count, rest.trim()))
 }
 
+/// The result of a [`wrap_inline`] operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrapResult {
+    /// The text with the markers applied.
+    pub text: String,
+    /// The byte column of the caret in the resulting text.
+    pub caret: usize,
+}
+
+/// Wraps the selected byte range of a single line of `text` with `open` and
+/// `close` markers, or inserts the markers at `caret` when there is no
+/// selection (or the range is empty), leaving the caret between them.
+///
+/// This is how the toolbar applies inline bold, italic, and code formatting:
+/// the markers are stored as visible markdown characters, since this editor
+/// has no rich text spans.
+#[must_use]
+pub fn wrap_inline(
+    text: &str,
+    selection: Option<(usize, usize)>,
+    caret: usize,
+    open: &str,
+    close: &str,
+) -> WrapResult {
+    let (start, end) = match selection {
+        Some((a, b)) => (a.min(b), a.max(b)),
+        None => (caret, caret),
+    };
+    // Columns are byte offsets from cosmic-text; clamp to character
+    // boundaries so the string slices never panic.
+    let start = text.floor_char_boundary(start);
+    let end = text.floor_char_boundary(end);
+    let mut wrapped = String::with_capacity(text.len() + open.len() + close.len());
+    wrapped.push_str(&text[..start]);
+    wrapped.push_str(open);
+    wrapped.push_str(&text[start..end]);
+    wrapped.push_str(close);
+    wrapped.push_str(&text[end..]);
+    let caret = if selection.is_some() {
+        end + open.len() + close.len()
+    } else {
+        start + open.len()
+    };
+    WrapResult {
+        text: wrapped,
+        caret,
+    }
+}
+
 /// The block kind that a line of exactly this text would become, used to
 /// auto-convert a block as the user types a markdown prefix.
 ///
@@ -452,7 +501,7 @@ pub(crate) fn prefix_kind(text: &str) -> Option<BlockKind> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_markdown, prefix_kind, serialize_markdown, Block, BlockKind};
+    use super::{is_divider, parse_markdown, prefix_kind, serialize_markdown, wrap_inline, Block, BlockKind};
 
     /// Asserts that parsing and re-serializing is the identity for text that
     /// is already in canonical markdown form.
@@ -773,5 +822,44 @@ mod tests {
         assert_eq!(prefix_kind("text"), None);
         assert_eq!(prefix_kind("1"), None);
         assert_eq!(prefix_kind(""), None);
+    }
+
+    #[test]
+    fn divider_markers_are_detected() {
+        assert!(is_divider("---"));
+        assert!(is_divider("***"));
+        assert!(is_divider("___"));
+        assert!(!is_divider("--"));
+        assert!(!is_divider("---- text"));
+        assert!(!is_divider(""));
+    }
+
+    #[test]
+    fn wrap_inline_wraps_the_selection() {
+        let result = wrap_inline("hello world", Some((0, 5)), 5, "**", "**");
+        assert_eq!(result.text, "**hello** world");
+        assert_eq!(result.caret, 9);
+    }
+
+    #[test]
+    fn wrap_inline_handles_reversed_selection() {
+        let result = wrap_inline("hello", Some((5, 0)), 5, "*", "*");
+        assert_eq!(result.text, "*hello*");
+        assert_eq!(result.caret, 7);
+    }
+
+    #[test]
+    fn wrap_inline_inserts_markers_at_the_caret() {
+        let result = wrap_inline("abc", None, 1, "`", "`");
+        assert_eq!(result.text, "a``bc");
+        assert_eq!(result.caret, 2);
+    }
+
+    #[test]
+    fn wrap_inline_clamps_to_char_boundaries() {
+        // "é" is two bytes; a column inside it clamps to its start.
+        let result = wrap_inline("aé", Some((1, 2)), 1, "**", "**");
+        assert_eq!(result.text, "a****é");
+        assert_eq!(result.caret, 5);
     }
 }

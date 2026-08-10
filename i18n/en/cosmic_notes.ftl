@@ -43,3 +43,17 @@ delete-note-title = Delete note?
 delete-note-body = "{$name}" will be permanently deleted. This cannot be undone.
 empty-trash-title = Empty Trash?
 empty-trash-body = All trashed notes will be permanently deleted. This cannot be undone.
+
+paragraph = Paragraph
+heading-1 = Heading 1
+heading-2 = Heading 2
+heading-3 = Heading 3
+bullet-list = Bullet list
+numbered-list = Numbered list
+todo-list = To-do list
+quote = Quote
+code-block = Code block
+divider = Divider
+bold = Bold
+italic = Italic
+inline-code = Inline code
