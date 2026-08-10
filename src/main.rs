@@ -2,6 +2,9 @@
 
 mod app;
 mod config;
+// Used by the block editor; the UI wires it in once Stage 1 lands.
+#[allow(dead_code)]
+mod editor;
 mod i18n;
 mod notes;
 
