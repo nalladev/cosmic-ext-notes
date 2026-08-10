@@ -29,6 +29,8 @@ pub struct Note {
     pinned: bool,
     /// Creation timestamp (RFC 3339) from the frontmatter, if any.
     created: Option<String>,
+    /// Whether the note should open in preview mode.
+    preview: bool,
     /// Last modification time of the file, if known.
     modified: Option<SystemTime>,
     /// The full text of the file as it was loaded from disk.
@@ -54,6 +56,12 @@ impl Note {
     #[must_use]
     pub fn pinned(&self) -> bool {
         self.pinned
+    }
+
+    /// Whether the note should open in preview mode.
+    #[must_use]
+    pub fn preview(&self) -> bool {
+        self.preview
     }
 
     /// Last modification time of the file, if known.
@@ -94,6 +102,7 @@ impl Note {
     fn full_text(&self) -> String {
         let mut frontmatter = Frontmatter::new();
         frontmatter.set_pinned(self.pinned);
+        frontmatter.set_preview(self.preview);
         if let Some(created) = &self.created {
             frontmatter.set_created(created.clone());
         }
@@ -114,6 +123,7 @@ impl Note {
             title,
             pinned: frontmatter.pinned(),
             created: frontmatter.created().map(str::to_owned),
+            preview: frontmatter.preview(),
             modified,
             loaded: text,
             body,
@@ -130,6 +140,7 @@ impl Note {
             .unwrap_or_default();
         self.pinned = frontmatter.pinned();
         self.created = frontmatter.created().map(str::to_owned);
+        self.preview = frontmatter.preview();
         self.modified = fs::metadata(&self.path)
             .and_then(|meta| meta.modified())
             .ok();
@@ -310,6 +321,34 @@ impl Vault {
         Ok(Some(updated))
     }
 
+    /// Sets the preview preference of the note with the given path. The
+    /// frontmatter is updated in place, and the file's modification time is
+    /// preserved so the note does not reorder in the list. Returns the updated
+    /// note, or `None` if the note is unknown.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the note file cannot be read or written.
+    pub fn set_preview(&mut self, id: &Path, preview: bool) -> io::Result<Option<Note>> {
+        let Some(index) = self.notes.iter().position(|note| note.path == id) else {
+            return Ok(None);
+        };
+        let note = &mut self.notes[index];
+        note.preview = preview;
+
+        let disk_text = fs::read_to_string(&note.path)?;
+        let (mut frontmatter, body) = Frontmatter::parse(&disk_text);
+        frontmatter.set_preview(preview);
+        let text = frontmatter.render() + body;
+        write_atomic(&note.path, &text)?;
+        if let Some(modified) = note.modified {
+            set_modified_time(&note.path, modified)?;
+        }
+        note.reload_from(&text);
+        let updated = note.clone();
+        Ok(Some(updated))
+    }
+
     /// Moves the note with the given path into the trash. Returns the updated
     /// note, or `None` if the note is unknown or already trashed.
     ///
@@ -426,6 +465,8 @@ impl Vault {
 struct Frontmatter {
     pinned: Option<bool>,
     created: Option<String>,
+    /// Whether the note should open in preview mode.
+    preview: Option<bool>,
     /// Lines that are not recognized key/value pairs, preserved verbatim.
     extra: Vec<String>,
 }
@@ -446,6 +487,11 @@ impl Frontmatter {
         self.created.as_deref()
     }
 
+    /// The preview preference, defaulting to `false`.
+    fn preview(&self) -> bool {
+        self.preview.unwrap_or(false)
+    }
+
     /// Sets the pinned state.
     fn set_pinned(&mut self, pinned: bool) {
         self.pinned = Some(pinned);
@@ -454,6 +500,11 @@ impl Frontmatter {
     /// Sets the creation timestamp.
     fn set_created(&mut self, created: String) {
         self.created = Some(created);
+    }
+
+    /// Sets the preview preference.
+    fn set_preview(&mut self, preview: bool) {
+        self.preview = Some(preview);
     }
 
     /// Parses a frontmatter block from the start of `text`. Returns the parsed
@@ -475,6 +526,7 @@ impl Frontmatter {
                 match key.trim() {
                     "pinned" => frontmatter.pinned = Some(value.trim() == "true"),
                     "created" => frontmatter.created = Some(unquote(value.trim())),
+                    "preview" => frontmatter.preview = Some(value.trim() == "true"),
                     _ => frontmatter.extra.push(line.to_owned()),
                 }
             } else {
@@ -493,6 +545,7 @@ impl Frontmatter {
         if let Some(created) = &self.created {
             writeln!(out, "created: {created}").expect("write to string");
         }
+        writeln!(out, "preview: {}", self.preview.unwrap_or(false)).expect("write to string");
         for line in &self.extra {
             out.push_str(line);
             out.push('\n');
@@ -564,6 +617,13 @@ fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, text)?;
     fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Restores the modification time of a file.
+fn set_modified_time(path: &Path, time: SystemTime) -> io::Result<()> {
+    let file = fs::File::options().write(true).open(path)?;
+    file.set_times(fs::FileTimes::new().set_modified(time))?;
     Ok(())
 }
 
@@ -831,6 +891,42 @@ mod tests {
 
         let on_disk = fs::read_to_string(&path).expect("read");
         assert!(on_disk.contains("Some body"));
+    }
+
+    #[test]
+    fn set_preview_persists_and_preserves_mtime() {
+        let dir = temp_dir();
+        let mut vault = Vault::open(&dir).expect("open");
+        let note = vault.create("Preview me").expect("create").expect("title");
+        let path = note.path().to_path_buf();
+        let mtime = note.modified().expect("mtime");
+
+        // Toggling preview must not reorder the list, so the mtime is preserved.
+        let updated = vault
+            .set_preview(&path, true)
+            .expect("set preview")
+            .expect("note");
+        assert!(updated.preview());
+        assert_eq!(updated.modified(), Some(mtime));
+
+        // The preference is stored in the frontmatter and survives a reopen.
+        let on_disk = fs::read_to_string(&path).expect("read");
+        assert!(on_disk.contains("preview: true"));
+        let reopened = Vault::open(&dir).expect("reopen");
+        let reloaded = reopened
+            .notes()
+            .iter()
+            .find(|note| note.path() == path)
+            .expect("note present");
+        assert!(reloaded.preview());
+
+        // Turning it off writes `preview: false`.
+        let off = vault
+            .set_preview(&path, false)
+            .expect("set preview")
+            .expect("note");
+        assert!(!off.preview());
+        assert!(fs::read_to_string(&path).expect("read").contains("preview: false"));
     }
 
     #[test]

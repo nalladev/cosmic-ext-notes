@@ -11,11 +11,11 @@ use cosmic::iced::keyboard::Key;
 use cosmic::iced::{Alignment, Length, Subscription, event, keyboard};
 use cosmic::prelude::*;
 use cosmic::widget::{
-    self, Toasts, about::About, button, divider, icon, list_column, markdown, menu, nav_bar,
-    text_editor, text_input, toaster, tooltip,
+    self, Toasts, about::About, button, dialog, divider, icon, list_column, markdown, menu,
+    nav_bar, text_editor, text_input, toaster, tooltip,
 };
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
@@ -60,6 +60,8 @@ pub struct AppModel {
     markdown: Option<markdown::Content>,
     /// The note search query.
     search: String,
+    /// A pending destructive action awaiting confirmation.
+    confirm: Option<Confirm>,
     /// Toast notifications.
     toasts: Toasts<Message>,
 }
@@ -89,10 +91,15 @@ pub enum Message {
     TrashNote,
     /// Restore the trashed note with the given path.
     RestoreNote(PathBuf),
-    /// Permanently delete the trashed note with the given path.
+    /// Permanently delete the trashed note with the given path. Opens a
+    /// confirmation dialog first.
     DeleteNote(PathBuf),
-    /// Permanently delete all trashed notes.
+    /// Permanently delete all trashed notes. Opens a confirmation dialog first.
     EmptyTrash,
+    /// Confirm the pending destructive action.
+    ConfirmDialog,
+    /// Dismiss the confirmation dialog without acting.
+    DismissDialog,
     /// An action was performed in the text editor.
     Edit(text_editor::Action),
     /// Toggle between the editor and the markdown preview.
@@ -135,6 +142,15 @@ impl Shortcut {
         );
         binds
     }
+}
+
+/// A pending destructive action awaiting confirmation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Confirm {
+    /// Permanently delete the note at the given path.
+    Delete(PathBuf),
+    /// Permanently delete all trashed notes.
+    EmptyTrash,
 }
 
 /// Create a COSMIC application from the app model
@@ -215,6 +231,7 @@ impl cosmic::Application for AppModel {
             preview: false,
             markdown: None,
             search: String::new(),
+            confirm: None,
             toasts: Toasts::new(Message::ToastClosed),
         };
 
@@ -268,6 +285,45 @@ impl cosmic::Application for AppModel {
                 Message::ToggleContextPage(ContextPage::About),
             ),
         })
+    }
+
+    /// Displays a confirmation dialog for destructive actions.
+    fn dialog(&self) -> Option<Element<'_, Self::Message>> {
+        let confirm = self.confirm.as_ref()?;
+        let (title, body, confirm_label) = match confirm {
+            Confirm::Delete(path) => {
+                let name = self
+                    .vault
+                    .notes()
+                    .iter()
+                    .find(|note| note.path() == path)
+                    .map_or_else(String::new, |note| note.title().to_owned());
+                (
+                    fl!("delete-note-title"),
+                    fl!("delete-note-body", name = name),
+                    fl!("delete"),
+                )
+            }
+            Confirm::EmptyTrash => (
+                fl!("empty-trash-title"),
+                fl!("empty-trash-body"),
+                fl!("empty-trash"),
+            ),
+        };
+        let cancel = button::text(fl!("cancel"))
+            .on_press(Message::DismissDialog)
+            .class(cosmic::theme::Button::Text);
+        let confirm = button::text(confirm_label)
+            .on_press(Message::ConfirmDialog)
+            .class(cosmic::theme::Button::Destructive);
+        Some(
+            dialog::dialog()
+                .title(title)
+                .body(body)
+                .secondary_action(cancel)
+                .primary_action(confirm)
+                .into(),
+        )
     }
 
     /// Describes the interface based on the current state of the application model.
@@ -382,8 +438,9 @@ impl cosmic::Application for AppModel {
                 if let Some(note) = self.vault.notes().iter().find(|note| note.path() == path) {
                     let body = note.body().to_owned();
                     let title = note.title().to_owned();
+                    let preview = note.preview();
                     self.selected = Some(path);
-                    self.load_body(&body, &title);
+                    self.load_body(&body, &title, preview);
                 } else {
                     self.selected = Some(path);
                 }
@@ -441,14 +498,13 @@ impl cosmic::Application for AppModel {
             }
 
             Message::RestoreNote(path) => match self.vault.restore(&path) {
-                Ok(Some(_)) => {
-                    let mut tasks = vec![self.toast(fl!("note-restored"))];
-                    if self.selected.as_ref() == Some(&path) {
-                        self.selected = None;
-                        self.clear_editor();
-                        tasks.push(self.update_title());
-                    }
-                    Task::batch(tasks)
+                Ok(Some(note)) => {
+                    // Make the restored note visible again and select it.
+                    self.nav.activate_position(0);
+                    let restored_path = note.path().to_path_buf();
+                    self.selected = Some(restored_path);
+                    self.load_note(&note);
+                    Task::batch([self.toast(fl!("note-restored")), self.update_title()])
                 }
                 Ok(None) => Task::none(),
                 Err(err) => {
@@ -457,39 +513,30 @@ impl cosmic::Application for AppModel {
                 }
             },
 
-            Message::DeleteNote(path) => match self.vault.delete(&path) {
-                Ok(true) => {
-                    let mut tasks = vec![self.toast(fl!("note-deleted"))];
-                    if self.selected.as_ref() == Some(&path) {
-                        self.selected = None;
-                        self.clear_editor();
-                        tasks.push(self.update_title());
-                    }
-                    Task::batch(tasks)
-                }
-                Ok(false) => Task::none(),
-                Err(err) => {
-                    eprintln!("failed to delete note: {err}");
-                    self.toast(fl!("save-error"))
-                }
-            },
+            Message::DeleteNote(path) => {
+                self.confirm = Some(Confirm::Delete(path));
+                Task::none()
+            }
 
-            Message::EmptyTrash => match self.vault.empty_trash() {
-                Ok(count) if count > 0 => {
-                    if let Some(path) = &self.selected
-                        && self.vault.notes().iter().all(|note| note.path() != path)
-                    {
-                        self.selected = None;
-                        self.clear_editor();
-                    }
-                    self.toast(fl!("trash-emptied"))
+            Message::EmptyTrash => {
+                self.confirm = Some(Confirm::EmptyTrash);
+                Task::none()
+            }
+
+            Message::ConfirmDialog => {
+                let Some(confirm) = self.confirm.take() else {
+                    return Task::none();
+                };
+                match confirm {
+                    Confirm::Delete(path) => self.delete_note(&path),
+                    Confirm::EmptyTrash => self.empty_trash(),
                 }
-                Ok(_) => Task::none(),
-                Err(err) => {
-                    eprintln!("failed to empty trash: {err}");
-                    self.toast(fl!("save-error"))
-                }
-            },
+            }
+
+            Message::DismissDialog => {
+                self.confirm = None;
+                Task::none()
+            }
 
             Message::Edit(action) => {
                 let is_edit = action.is_edit();
@@ -508,7 +555,16 @@ impl cosmic::Application for AppModel {
                     let text = self.editor_text();
                     self.markdown = Some(markdown::Content::parse(&text));
                 }
-                Task::none()
+                let Some(path) = self.selected.clone() else {
+                    return Task::none();
+                };
+                match self.vault.set_preview(&path, self.preview) {
+                    Ok(_) => Task::none(),
+                    Err(err) => {
+                        eprintln!("failed to save preview preference: {err}");
+                        self.toast(fl!("save-error"))
+                    }
+                }
             }
 
             Message::LinkClicked(url) => {
@@ -544,6 +600,11 @@ impl cosmic::Application for AppModel {
 
     /// Called when the escape key is pressed.
     fn on_escape(&mut self) -> Task<cosmic::Action<Self::Message>> {
+        // A confirmation dialog takes precedence over clearing the search.
+        if self.confirm.is_some() {
+            self.confirm = None;
+            return Task::none();
+        }
         if !self.search.is_empty() {
             self.search.clear();
         }
@@ -573,13 +634,15 @@ impl AppModel {
     fn load_note(&mut self, note: &Note) {
         let body = note.body().to_owned();
         let title = note.title().to_owned();
-        self.load_body(&body, &title);
+        let preview = note.preview();
+        self.load_body(&body, &title, preview);
     }
 
-    /// Loads the given body and title into the editor.
-    fn load_body(&mut self, body: &str, title: &str) {
+    /// Loads the given body, title, and preview preference into the editor.
+    fn load_body(&mut self, body: &str, title: &str, preview: bool) {
         self.editor = text_editor::Content::with_text(body);
         title.clone_into(&mut self.title_draft);
+        self.preview = preview;
         self.dirty = false;
         self.markdown = Some(markdown::Content::parse(body));
     }
@@ -643,7 +706,8 @@ impl AppModel {
                 if let Some(note) = self.vault.notes().iter().find(|note| note.path() == path) {
                     let body = note.body().to_owned();
                     let title = note.title().to_owned();
-                    self.load_body(&body, &title);
+                    let preview = note.preview();
+                    self.load_body(&body, &title, preview);
                 }
                 let name = conflict
                     .file_name()
@@ -681,6 +745,46 @@ impl AppModel {
             Ok(None) => {}
             Err(err) => {
                 eprintln!("failed to rename note: {err}");
+            }
+        }
+    }
+
+    /// Permanently deletes the note with the given path.
+    fn delete_note(&mut self, path: &Path) -> Task<cosmic::Action<Message>> {
+        match self.vault.delete(path) {
+            Ok(true) => {
+                let mut tasks = vec![self.toast(fl!("note-deleted"))];
+                if self.selected.as_deref() == Some(path) {
+                    self.selected = None;
+                    self.clear_editor();
+                    tasks.push(self.update_title());
+                }
+                Task::batch(tasks)
+            }
+            Ok(false) => Task::none(),
+            Err(err) => {
+                eprintln!("failed to delete note: {err}");
+                self.toast(fl!("save-error"))
+            }
+        }
+    }
+
+    /// Permanently deletes every trashed note.
+    fn empty_trash(&mut self) -> Task<cosmic::Action<Message>> {
+        match self.vault.empty_trash() {
+            Ok(count) if count > 0 => {
+                if let Some(path) = &self.selected
+                    && self.vault.notes().iter().all(|note| note.path() != path)
+                {
+                    self.selected = None;
+                    self.clear_editor();
+                }
+                self.toast(fl!("trash-emptied"))
+            }
+            Ok(_) => Task::none(),
+            Err(err) => {
+                eprintln!("failed to empty trash: {err}");
+                self.toast(fl!("save-error"))
             }
         }
     }
