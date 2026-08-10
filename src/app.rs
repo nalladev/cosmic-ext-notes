@@ -673,6 +673,12 @@ impl cosmic::Application for AppModel {
 
             Message::BlockAction { index, action } => {
                 self.selected_block = index;
+                // A multi-line paste splits into blocks, like Futo; the
+                // editor's default behavior would embed raw newlines into
+                // the block.
+                if let Some(task) = self.intercept_paste(index, &action) {
+                    return Task::batch([task, self.update_title()]);
+                }
                 let is_edit = action.is_edit();
                 if is_edit {
                     self.push_undo(index);
@@ -2007,6 +2013,56 @@ impl AppModel {
         self.blocks.iter().map(EditableBlock::to_block).collect()
     }
 
+    /// Splits a multi-line paste into blocks (Futo behavior): the text
+    /// before the caret stays in the block, each pasted line becomes its own
+    /// block, and the text after the caret continues in a new block. Returns
+    /// a focus task when the paste was handled here, skipping the editor's
+    /// default behavior. Code blocks and single-line pastes keep the default.
+    fn intercept_paste(
+        &mut self,
+        index: usize,
+        action: &text_editor::Action,
+    ) -> Option<Task<cosmic::Action<Message>>> {
+        let text_editor::Action::Edit(text_editor::Edit::Paste(text)) = action else {
+            return None;
+        };
+        if !text.contains('\n') {
+            return None;
+        }
+        let block = self.blocks.get(index)?;
+        if matches!(block.kind, BlockKind::Code(_) | BlockKind::Divider)
+            || block.content.text().contains('\n')
+        {
+            return None;
+        }
+        let cursor = block.content.cursor();
+        // An inline selection (or caret) within the single line.
+        let (start, end) = match cursor.selection {
+            Some(anchor) if anchor.line == cursor.position.line => (
+                anchor.column.min(cursor.position.column),
+                anchor.column.max(cursor.position.column),
+            ),
+            _ => (cursor.position.column, cursor.position.column),
+        };
+        let pasted = editor::parse_markdown(text);
+        if pasted.is_empty() {
+            return None;
+        }
+        let line = block.content.text();
+        let kind = block.kind.clone();
+        let (replacement, caret_in_replacement) = paste_blocks(kind, &line, start, end, pasted);
+        let caret = index + caret_in_replacement;
+        self.push_undo_step();
+        self.blocks.splice(index..=index, replacement);
+        self.selected_block = caret;
+        if let Some(block) = self.blocks.get_mut(caret) {
+            let cursor = Self::end_cursor(&block.content);
+            block.content.move_to(cursor);
+        }
+        self.mark_dirty();
+        Some(Self::focus_block(caret).map(cosmic::action::app))
+    }
+
     /// Whether a new edit should start an undo step, given when the previous
     /// one was recorded. Typing bursts in the same block collapse into one
     /// step; anything else (time passing, another block) starts a new one.
@@ -2288,6 +2344,62 @@ impl menu::action::MenuAction for MenuAction {
     }
 }
 
+/// The kind a block continues as when split by a paste: structured kinds
+/// keep their marker, plain kinds fall back to a paragraph.
+#[must_use]
+fn continuation_kind(kind: &BlockKind) -> BlockKind {
+    match kind {
+        BlockKind::Bullet(level) => BlockKind::Bullet(*level),
+        BlockKind::Numbered(level, number) => BlockKind::Numbered(*level, *number),
+        BlockKind::Todo(level, done) => BlockKind::Todo(*level, *done),
+        BlockKind::Quote(level) => BlockKind::Quote(*level),
+        BlockKind::Paragraph | BlockKind::Heading(_) | BlockKind::Code(_) | BlockKind::Divider => {
+            BlockKind::Paragraph
+        }
+    }
+}
+
+/// The blocks that replace a single-line block when `pasted` (already
+/// parsed) is inserted over the byte range `start..end` of `line`, plus the
+/// index within the replacement of the block that receives the caret.
+///
+/// The text before the range stays in the original block (keeping its
+/// kind), the pasted blocks follow it, and the text after the range becomes
+/// a continuation of the original kind. Pasting into an entirely empty
+/// block replaces it with the pasted blocks.
+#[must_use]
+fn paste_blocks(
+    kind: BlockKind,
+    line: &str,
+    start: usize,
+    end: usize,
+    pasted: Vec<editor::Block>,
+) -> (Vec<EditableBlock>, usize) {
+    let before = line[..start].to_owned();
+    let after = line[end..].to_owned();
+    if before.is_empty() && after.is_empty() {
+        let blocks: Vec<EditableBlock> =
+            pasted.into_iter().map(EditableBlock::from_block).collect();
+        let caret = blocks.len().saturating_sub(1);
+        return (blocks, caret);
+    }
+    let mut blocks = Vec::with_capacity(2 + pasted.len());
+    let continuation = continuation_kind(&kind);
+    blocks.push(EditableBlock {
+        kind,
+        content: text_editor::Content::with_text(&before),
+    });
+    // The caret lands at the end of the last pasted block, just before the
+    // continuation of the text that followed the caret.
+    let caret = blocks.len() + pasted.len() - 1;
+    blocks.extend(pasted.into_iter().map(EditableBlock::from_block));
+    blocks.push(EditableBlock {
+        kind: continuation,
+        content: text_editor::Content::with_text(&after),
+    });
+    (blocks, caret)
+}
+
 /// Splits the text at the given byte offset, clamped down to a character
 /// boundary so multi-byte characters are never cut in half.
 #[must_use]
@@ -2298,8 +2410,8 @@ fn split_at(text: &str, column: usize) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppModel, UNDO_COALESCE, split_at};
-    use crate::editor::BlockKind;
+    use super::{AppModel, UNDO_COALESCE, paste_blocks, split_at};
+    use crate::editor::{self, BlockKind};
     use std::time::Instant;
 
     #[test]
@@ -2359,5 +2471,40 @@ mod tests {
             now + UNDO_COALESCE,
             0
         ));
+    }
+
+    #[test]
+    fn paste_blocks_splits_multi_line_paste() {
+        let pasted = vec![editor::Block::paragraph("X"), editor::Block::paragraph("Y")];
+        let (blocks, caret) = paste_blocks(BlockKind::Bullet(0), "ab", 1, 1, pasted);
+        let kinds: Vec<_> = blocks.iter().map(|b| b.kind.clone()).collect();
+        let text: Vec<_> = blocks.iter().map(|b| b.content.text()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                BlockKind::Bullet(0),
+                BlockKind::Paragraph,
+                BlockKind::Paragraph,
+                BlockKind::Bullet(0)
+            ]
+        );
+        assert_eq!(text, vec!["a", "X", "Y", "b"]);
+        // The caret lands at the end of the last pasted block.
+        assert_eq!(caret, 2);
+    }
+
+    #[test]
+    fn paste_blocks_replaces_empty_block_and_selection() {
+        // Pasting into an empty block replaces it with the pasted blocks.
+        let pasted = vec![editor::Block::paragraph("hello")];
+        let (blocks, caret) = paste_blocks(BlockKind::Todo(0, false), "", 0, 0, pasted);
+        assert_eq!(blocks[0].kind, BlockKind::Paragraph);
+        assert_eq!(caret, 0);
+        // Pasting over a selection drops the selected text.
+        let pasted = vec![editor::Block::paragraph("Z")];
+        let (blocks, caret) = paste_blocks(BlockKind::Bullet(1), "abcdef", 1, 4, pasted);
+        let text: Vec<_> = blocks.iter().map(|b| b.content.text()).collect();
+        assert_eq!(text, vec!["a", "Z", "ef"]);
+        assert_eq!(caret, 1);
     }
 }
