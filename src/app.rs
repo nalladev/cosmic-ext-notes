@@ -13,9 +13,9 @@ use cosmic::iced::{Alignment, Length, Subscription, event, keyboard};
 use cosmic::prelude::*;
 use cosmic::widget::{
     self, Toasts, about::About, button, dialog, divider, icon, list_column, markdown, menu,
-    nav_bar, popover, text_editor, text_input, toaster, tooltip,
+    popover, segmented_button, tab_bar, text_editor, text_input, toaster, tooltip,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -106,8 +106,16 @@ pub struct AppModel {
     context_page: ContextPage,
     /// The about page for this app.
     about: About,
-    /// Contains items assigned to the nav bar panel.
-    nav: nav_bar::Model,
+    /// The active page: all notes, pinned, or trash.
+    page: Page,
+    /// The page selector buttons at the top of the sidebar.
+    page_buttons: segmented_button::Model<segmented_button::SingleSelect>,
+    /// Notes currently open in tabs, in tab order.
+    open_tabs: Vec<PathBuf>,
+    /// The tab bar model, kept in sync with [`Self::open_tabs`].
+    tabs: segmented_button::Model<segmented_button::SingleSelect>,
+    /// Directories currently expanded in the sidebar tree.
+    expanded: HashSet<PathBuf>,
     /// Key bindings for the application's menu bar.
     #[allow(clippy::zero_sized_map_values)]
     key_binds: HashMap<menu::KeyBind, MenuAction>,
@@ -159,6 +167,14 @@ pub enum Message {
     KeyboardShortcut(Shortcut),
     /// The search query changed.
     SearchChanged(String),
+    /// The sidebar page changed (all notes, pinned, or trash).
+    PageChanged(Page),
+    /// Expand or collapse the folder with the given path in the sidebar tree.
+    ToggleFolder(PathBuf),
+    /// Close the tab of the note with the given path.
+    CloseTab(PathBuf),
+    /// Make the tab of the note with the given path active.
+    ActivateTab(PathBuf),
     /// Open the note with the given path.
     SelectNote(PathBuf),
     /// Create a new note.
@@ -387,24 +403,16 @@ impl cosmic::Application for AppModel {
         core: cosmic::Core,
         _flags: Self::Flags,
     ) -> (Self, Task<cosmic::Action<Self::Message>>) {
-        // Create a nav bar with the note lists.
-        let mut nav = nav_bar::Model::default();
-
-        nav.insert()
-            .text(fl!("all-notes"))
-            .data::<Page>(Page::All)
-            .icon(icon::from_name("document-text-symbolic"))
-            .activate();
-
-        nav.insert()
-            .text(fl!("pinned"))
-            .data::<Page>(Page::Pinned)
-            .icon(icon::from_name("starred-symbolic"));
-
-        nav.insert()
-            .text(fl!("trash"))
-            .data::<Page>(Page::Trash)
-            .icon(icon::from_name("user-trash-symbolic"));
+        // The sidebar page selector: all notes, pinned, or trash.
+        let mut page_buttons = segmented_button::Model::default();
+        for (page, label) in [
+            (Page::All, fl!("all-notes")),
+            (Page::Pinned, fl!("pinned")),
+            (Page::Trash, fl!("trash")),
+        ] {
+            page_buttons.insert().text(label).data(page);
+        }
+        page_buttons.activate_position(0);
 
         // Create the about widget
         let about = About::default()
@@ -427,7 +435,11 @@ impl cosmic::Application for AppModel {
             core,
             context_page: ContextPage::default(),
             about,
-            nav,
+            page: Page::All,
+            page_buttons,
+            open_tabs: Vec::new(),
+            tabs: segmented_button::Model::default(),
+            expanded: HashSet::new(),
             key_binds: Shortcut::key_binds(),
             config,
             vault,
@@ -478,11 +490,6 @@ impl cosmic::Application for AppModel {
             .on_press(Message::NewNote)
             .class(cosmic::theme::Button::Icon);
         vec![Self::tooltip(new_note.into(), fl!("new-note"))]
-    }
-
-    /// Enables the COSMIC application to create a nav bar with this model.
-    fn nav_model(&self) -> Option<&nav_bar::Model> {
-        Some(&self.nav)
     }
 
     /// Display a context drawer if the context page is requested.
@@ -541,10 +548,20 @@ impl cosmic::Application for AppModel {
 
     /// Describes the interface based on the current state of the application model.
     fn view(&self) -> Element<'_, Self::Message> {
+        let mut right = widget::column::with_capacity(2);
+        if let Some(tabs) = self.tab_bar() {
+            right = right.push(tabs);
+        }
+        right = right.push(self.editor_pane());
+
         let content = widget::row::with_capacity(2)
-            .push(self.note_pane())
+            .push(self.sidebar_pane())
             .push(divider::vertical::default())
-            .push(self.editor_pane())
+            .push(
+                widget::container(right)
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
             .height(Length::Fill);
 
         toaster(
@@ -642,27 +659,26 @@ impl cosmic::Application for AppModel {
                 Task::none()
             }
 
-            Message::SelectNote(path) => {
-                if self.selected.as_ref() == Some(&path) {
-                    return Task::none();
-                }
+            Message::SelectNote(path) | Message::ActivateTab(path) => self.open_tab(&path),
+
+            Message::CloseTab(path) => {
                 self.commit_title_rename();
                 let save = self.save_active(false);
-                if let Some(note) = self.vault.notes().iter().find(|note| note.path() == path) {
-                    let body = note.body().to_owned();
-                    let title = note.title().to_owned();
-                    let preview = note.preview();
-                    self.selected = Some(path);
-                    self.load_body(&body, &title, preview);
+                Task::batch([save, self.close_tab(&path)])
+            }
+
+            Message::ToggleFolder(path) => {
+                if self.expanded.contains(&path) {
+                    self.expanded.remove(&path);
                 } else {
-                    self.selected = Some(path);
+                    self.expanded.insert(path);
                 }
-                // Drop straight into the first block, like Futo does.
-                Task::batch([
-                    save,
-                    Self::focus_block(0).map(cosmic::action::app),
-                    self.update_title(),
-                ])
+                Task::none()
+            }
+
+            Message::PageChanged(page) => {
+                self.set_page(page);
+                self.update_title()
             }
 
             Message::NewNote => self.new_note(),
@@ -702,11 +718,12 @@ impl cosmic::Application for AppModel {
                     return save;
                 };
                 match self.vault.trash(&path) {
-                    Ok(Some(_)) => {
-                        self.selected = None;
-                        self.clear_editor();
-                        Task::batch([save, self.toast(fl!("note-trashed")), self.update_title()])
-                    }
+                    Ok(Some(_)) => Task::batch([
+                        save,
+                        self.close_tab(&path),
+                        self.toast(fl!("note-trashed")),
+                        self.update_title(),
+                    ]),
                     Ok(None) => save,
                     Err(err) => {
                         eprintln!("failed to trash note: {err}");
@@ -717,12 +734,11 @@ impl cosmic::Application for AppModel {
 
             Message::RestoreNote(path) => match self.vault.restore(&path) {
                 Ok(Some(note)) => {
-                    // Make the restored note visible again and select it.
-                    self.nav.activate_position(0);
+                    // Make the restored note visible again and open it.
+                    self.set_page(Page::All);
                     let restored_path = note.path().to_path_buf();
-                    self.selected = Some(restored_path);
-                    self.load_note(&note);
-                    Task::batch([self.toast(fl!("note-restored")), self.update_title()])
+                    let open = self.open_tab(&restored_path);
+                    Task::batch([self.toast(fl!("note-restored")), open])
                 }
                 Ok(None) => Task::none(),
                 Err(err) => {
@@ -1058,14 +1074,6 @@ impl cosmic::Application for AppModel {
         }
     }
 
-    /// Called when a nav item is selected.
-    fn on_nav_select(&mut self, id: nav_bar::Id) -> Task<cosmic::Action<Self::Message>> {
-        // Activate the page in the model.
-        self.nav.activate(id);
-
-        self.update_title()
-    }
-
     /// Called when the search function is requested (Ctrl+F).
     fn on_search(&mut self) -> Task<cosmic::Action<Self::Message>> {
         text_input::focus(cosmic::widget::Id::new(SEARCH_ID)).map(cosmic::action::app)
@@ -1161,8 +1169,9 @@ impl AppModel {
         match self.vault.create(&fl!("untitled")) {
             Ok(Some(note)) => {
                 // Make sure the new note is visible, even from the trash view.
-                self.nav.activate_position(0);
+                self.set_page(Page::All);
                 let path = note.path().to_path_buf();
+                self.open_tabs.push(path.clone());
                 self.selected = Some(path);
                 self.load_note(&note);
                 let focus =
@@ -1254,11 +1263,7 @@ impl AppModel {
         match self.vault.delete(path) {
             Ok(true) => {
                 let mut tasks = vec![self.toast(fl!("note-deleted"))];
-                if self.selected.as_deref() == Some(path) {
-                    self.selected = None;
-                    self.clear_editor();
-                    tasks.push(self.update_title());
-                }
+                tasks.push(self.close_tab(path));
                 Task::batch(tasks)
             }
             Ok(false) => Task::none(),
@@ -1273,13 +1278,22 @@ impl AppModel {
     fn empty_trash(&mut self) -> Task<cosmic::Action<Message>> {
         match self.vault.empty_trash() {
             Ok(count) if count > 0 => {
-                if let Some(path) = &self.selected
-                    && self.vault.notes().iter().all(|note| note.path() != path)
-                {
+                let mut tasks = Vec::new();
+                let active_gone = self.selected.as_ref().is_some_and(|selected| {
+                    self.vault
+                        .notes()
+                        .iter()
+                        .all(|note| note.path() != selected)
+                });
+                self.open_tabs
+                    .retain(|tab| self.vault.notes().iter().any(|note| note.path() == tab));
+                if active_gone {
                     self.selected = None;
                     self.clear_editor();
+                    tasks.push(self.update_title());
                 }
-                self.toast(fl!("trash-emptied"))
+                tasks.push(self.toast(fl!("trash-emptied")));
+                Task::batch(tasks)
             }
             Ok(_) => Task::none(),
             Err(err) => {
@@ -1287,6 +1301,134 @@ impl AppModel {
                 self.toast(fl!("save-error"))
             }
         }
+    }
+
+    /// Activates the given sidebar page in the page selector.
+    fn set_page(&mut self, page: Page) {
+        self.page = page;
+        let entity = self
+            .page_buttons
+            .iter()
+            .find(|entity| self.page_buttons.data::<Page>(*entity).copied() == Some(page));
+        if let Some(entity) = entity {
+            self.page_buttons.activate(entity);
+        }
+    }
+
+    /// Opens the note with the given path in a tab, switching to it.
+    fn open_tab(&mut self, path: &Path) -> Task<cosmic::Action<Message>> {
+        self.commit_title_rename();
+        let save = self.save_active(false);
+        if !self.open_tabs.iter().any(|tab| tab == path) {
+            self.open_tabs.push(path.to_path_buf());
+        }
+        self.selected = Some(path.to_path_buf());
+        if let Some(note) = self.vault.notes().iter().find(|note| note.path() == path) {
+            let body = note.body().to_owned();
+            let title = note.title().to_owned();
+            let preview = note.preview();
+            self.load_body(&body, &title, preview);
+            // Drop straight into the first block, like Futo does.
+            self.sync_tabs();
+            Task::batch([
+                save,
+                Self::focus_block(0).map(cosmic::action::app),
+                self.update_title(),
+            ])
+        } else {
+            self.sync_tabs();
+            Task::batch([save, self.update_title()])
+        }
+    }
+
+    /// Closes the tab of the note with the given path, activating a neighbor
+    /// when the active tab is closed.
+    fn close_tab(&mut self, path: &Path) -> Task<cosmic::Action<Message>> {
+        let was_active = self.selected.as_deref() == Some(path);
+        let index = self.open_tabs.iter().position(|tab| tab == path);
+        if let Some(index) = index {
+            self.open_tabs.remove(index);
+        }
+        if !was_active {
+            self.sync_tabs();
+            return Task::none();
+        }
+        self.selected = None;
+        // Prefer the tab after the closed one, falling back to the previous.
+        let next = self
+            .open_tabs
+            .get(index.unwrap_or(0))
+            .or_else(|| self.open_tabs.last())
+            .cloned();
+        if let Some(path) = next {
+            return self.open_tab(&path);
+        }
+        self.sync_tabs();
+        self.clear_editor();
+        self.update_title()
+    }
+
+    /// Rebuilds the tab bar model from [`Self::open_tabs`], activating the
+    /// tab of the selected note (or the first tab).
+    fn sync_tabs(&mut self) {
+        let active = self
+            .selected
+            .as_ref()
+            .filter(|path| self.open_tabs.contains(path));
+        let mut tabs = segmented_button::Model::default();
+        for path in &self.open_tabs {
+            let title = self
+                .vault
+                .notes()
+                .iter()
+                .find(|note| note.path() == path)
+                .map_or_else(|| fl!("untitled"), |note| note.title().to_owned());
+            tabs.insert().text(title).data(path.clone()).closable();
+        }
+        let entity = active
+            .and_then(|path| {
+                tabs.iter()
+                    .find(|entity| tabs.data::<PathBuf>(*entity) == Some(path))
+            })
+            .or_else(|| tabs.iter().next());
+        if let Some(entity) = entity {
+            tabs.activate(entity);
+        }
+        self.tabs = tabs;
+    }
+
+    /// The tab bar over the open notes, if any.
+    fn tab_bar(&self) -> Option<Element<'_, Message>> {
+        if self.open_tabs.is_empty() {
+            return None;
+        }
+        let paths: HashMap<segmented_button::Entity, PathBuf> = self
+            .tabs
+            .iter()
+            .filter_map(|entity| {
+                self.tabs
+                    .data::<PathBuf>(entity)
+                    .cloned()
+                    .map(|path| (entity, path))
+            })
+            .collect();
+        let activate_paths = paths.clone();
+        Some(
+            tab_bar::horizontal(&self.tabs)
+                .on_activate(move |entity| {
+                    activate_paths
+                        .get(&entity)
+                        .cloned()
+                        .map_or(Message::Ignored, Message::ActivateTab)
+                })
+                .on_close(move |entity| {
+                    paths
+                        .get(&entity)
+                        .cloned()
+                        .map_or(Message::Ignored, Message::CloseTab)
+                })
+                .into(),
+        )
     }
 
     /// Pushes a toast notification.
@@ -1298,14 +1440,13 @@ impl AppModel {
 
     /// The notes shown in the middle pane, filtered by page and search query.
     fn visible_notes(&self) -> Vec<&Note> {
-        let page = self.nav.active_data::<Page>().copied().unwrap_or(Page::All);
         let query = self.search.trim().to_lowercase();
         self.vault
             .notes()
             .iter()
             .filter(|note| {
                 let in_trash = note.in_trash();
-                let matches_page = match page {
+                let matches_page = match self.page {
                     Page::All => !in_trash,
                     Page::Pinned => !in_trash && note.pinned(),
                     Page::Trash => in_trash,
@@ -1319,40 +1460,61 @@ impl AppModel {
             .collect()
     }
 
-    /// The middle pane: search box and the note list.
-    fn note_pane(&self) -> Element<'_, Message> {
-        let space_s = cosmic::theme::spacing().space_s;
+    /// The left sidebar: page selector, search, and the note tree (or the
+    /// trashed-note list on the trash page).
+    fn sidebar_pane(&self) -> Element<'_, Message> {
+        let spacing = cosmic::theme::spacing();
+        let space_s = spacing.space_s;
+
+        // Page selector: all notes, pinned, or trash.
+        let pages: HashMap<segmented_button::Entity, Page> = self
+            .page_buttons
+            .iter()
+            .filter_map(|entity| {
+                self.page_buttons
+                    .data::<Page>(entity)
+                    .copied()
+                    .map(|page| (entity, page))
+            })
+            .collect();
+        let page_selector: Element<'_, Message> = segmented_button::vertical(&self.page_buttons)
+            .on_activate(move |entity| {
+                pages
+                    .get(&entity)
+                    .copied()
+                    .map_or(Message::Ignored, Message::PageChanged)
+            })
+            .into();
 
         let search = text_input::search_input(fl!("search-placeholder"), &self.search)
             .id(cosmic::widget::Id::new(SEARCH_ID))
             .on_input(Message::SearchChanged)
             .width(Length::Fill);
 
-        let notes = self.visible_notes();
-        let list: Element<'_, Message> = if notes.is_empty() {
-            self.list_empty_state()
+        let body: Element<'_, Message> = if self.page == Page::Trash {
+            self.trash_list()
         } else {
-            let mut list = list_column::with_capacity(notes.len());
-            for note in notes {
-                let selected = self.selected.as_deref() == Some(note.path());
-                list = list.add(
-                    list_column::button(Self::note_row(note))
-                        .selected(selected)
-                        .on_press(Message::SelectNote(note.path().to_path_buf())),
-                );
-            }
-            list.into_element()
+            crate::sidebar::tree_view(
+                &self.vault,
+                &self.expanded,
+                self.selected.as_deref(),
+                self.page,
+                &self.search,
+            )
         };
 
-        let mut column = widget::column::with_capacity(3)
-            .push(widget::container(search).padding(space_s))
-            .push(widget::scrollable(list).height(Length::Fill))
+        let mut column = widget::column::with_capacity(4)
+            .push(
+                widget::container(page_selector)
+                    .padding([space_s, space_s, 0, space_s])
+                    .width(Length::Fill),
+            )
+            .push(widget::container(search).padding([space_s, space_s, 0, space_s]))
+            .push(widget::scrollable(body).height(Length::Fill))
             .width(300)
             .height(Length::Fill);
 
-        if self.nav.active_data::<Page>().copied() == Some(Page::Trash)
-            && self.vault.notes().iter().any(Note::in_trash)
-        {
+        if self.page == Page::Trash && self.vault.notes().iter().any(Note::in_trash) {
             column = column.push(
                 widget::container(
                     button::text(fl!("empty-trash"))
@@ -1366,6 +1528,24 @@ impl AppModel {
         }
 
         column.into()
+    }
+
+    /// The flat list of trashed notes (the tree hides the trash directory).
+    fn trash_list(&self) -> Element<'_, Message> {
+        let notes = self.visible_notes();
+        if notes.is_empty() {
+            return self.list_empty_state();
+        }
+        let mut list = list_column::with_capacity(notes.len());
+        for note in notes {
+            let selected = self.selected.as_deref() == Some(note.path());
+            list = list.add(
+                list_column::button(Self::note_row(note))
+                    .selected(selected)
+                    .on_press(Message::SelectNote(note.path().to_path_buf())),
+            );
+        }
+        list.into_element()
     }
 
     /// A single note row in the list.
@@ -1392,7 +1572,7 @@ impl AppModel {
     /// The empty state shown in the note list.
     fn list_empty_state(&self) -> Element<'_, Message> {
         let space_s = cosmic::theme::spacing().space_s;
-        let page = self.nav.active_data::<Page>().copied().unwrap_or(Page::All);
+        let page = self.page;
         let (message, detail) = match page {
             Page::Trash => (fl!("trash-empty"), String::new()),
             _ => (fl!("no-notes"), fl!("no-notes-desc")),
@@ -1491,11 +1671,44 @@ impl AppModel {
         if !self.preview {
             column = column.push(self.block_toolbar());
         }
-        column
-            .push(body)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        column = column.push(body);
+        if let Some(panel) = self.backlinks_panel() {
+            column = column.push(divider::horizontal::default()).push(panel);
+        }
+        column.width(Length::Fill).height(Length::Fill).into()
+    }
+
+    /// A panel listing the notes that link to the active note, if any.
+    fn backlinks_panel(&self) -> Option<Element<'_, Message>> {
+        let path = self.selected.as_ref()?;
+        let links = crate::backlinks::backlinks(&self.vault, path);
+        if links.is_empty() {
+            return None;
+        }
+        let spacing = cosmic::theme::spacing();
+        let mut column = widget::column::with_capacity(links.len() + 1)
+            .push(widget::text::title4(fl!("backlinks")))
+            .spacing(spacing.space_xxs);
+        for link in &links {
+            let title = self
+                .vault
+                .notes()
+                .iter()
+                .find(|note| note.path() == link.from)
+                .map_or_else(String::new, |note| note.title().to_owned());
+            let row: Element<'_, Message> = button::custom(widget::text::body(title))
+                .on_press(Message::SelectNote(link.from.clone()))
+                .class(cosmic::theme::Button::ListItem([0.0, 0.0, 0.0, 0.0]))
+                .width(Length::Fill)
+                .into();
+            column = column.push(row);
+        }
+        Some(
+            widget::container(column)
+                .padding([spacing.space_s, spacing.space_s])
+                .width(Length::Fill)
+                .into(),
+        )
     }
 
     /// The block editor: a scrollable column of per-block text editors.
@@ -2052,6 +2265,24 @@ impl AppModel {
                     && Self::next_editable(blocks, index).is_some()
                 {
                     Some(Binding::Custom(Message::FocusNext(index)))
+                } else {
+                    Binding::from_key_press(key_press)
+                }
+            }
+            Key::Character(" ")
+                if !key_press.modifiers.control()
+                    && !key_press.modifiers.alt()
+                    && !key_press.modifiers.shift() =>
+            {
+                // Space on a todo checkbox toggles it instead of inserting a
+                // space at the start of the content.
+                if editor::space_toggles_todo(
+                    &block.kind,
+                    position.line,
+                    position.column,
+                    block.content.cursor().selection.is_some(),
+                ) {
+                    Some(Binding::Custom(Message::ToggleTodo(index)))
                 } else {
                     Binding::from_key_press(key_press)
                 }

@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
 mod app;
+mod backlinks;
 mod config;
 mod editor;
 mod i18n;
 mod notes;
+mod sidebar;
 
 fn main() -> cosmic::iced::Result {
     // Get the system's preferred languages.

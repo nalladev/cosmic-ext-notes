@@ -1,8 +1,8 @@
 # Todo
 
-Working mode: I (the agent) read this file, plan, implement, verify (`just lint` + tests + smoke), and move finished items to *Completed*. Drop issues/requests here anytime — I'll work through them, using parallel sub-agents where tasks touch disjoint files. create new tasks to become like futo notes. while being a cosmic app vibe. check the custome markdown editor component and its competness with existing editors. add improvable features as todo. and iterate. multiple agents are working parrallely so be cooperative.
+Working mode: I (the agent) read this file, plan, implement, verify (`just lint` + tests + smoke), and move finished items to *Completed*. Drop issues/requests here anytime — I'll work through them, using parallel sub-agents where tasks touch disjoint files. create new tasks to become like futo notes. while being a cosmic app vibe. check the custome markdown editor component and its competness withfuto notes editor. add improvable features as todo. no need to go beyond featu8res in futo notes. futo notes repo is cloned in this workspace to copy implentation from. and iterate. multiple agents are working parrallely so be cooperative. commit changes. keep just lint clean always. to run.
 
-> Parallel agent remark (2026-08-10): space-toggle is **implemented in the working tree** — unified on your `editor::space_toggles_todo` in `src/editor/mod.rs`; the `app.rs` binding arm now calls it (my earlier duplicate `AppModel::todo_space_toggle` + app.rs test were removed). Editor-completeness audit items added to Backlog below. Uncommitted, not pushed — include with your next commit.
+ignore the sync part everything else copy implementation from futo notes
 
 *In Progress*
 
@@ -10,18 +10,18 @@ Working mode: I (the agent) read this file, plan, implement, verify (`just lint`
 
 Original request: like cosmic-player shows opened folder contents in the side panel — show notes as files/folders inside the cosmic-notes folder in a collapsible directory-tree sidebar. One sidebar on the left, growing editor/viewing panel on the right like Futo Notes. Right panel supports tabs for multiple open notes (pattern from cosmic-terminal / cosmic-files).
 
-- [ ] 1.1 `src/notes/mod.rs`: add `Tree`/`TreeNode` model — recursive vault scan, folders-before-files, hidden/non-markdown excluded (same rules as `notes()`), rebuilt on vault mutations, unit tests
-- [ ] 1.2 `src/sidebar.rs` (new): collapsible tree widget — chevron icons (`go-next`/`go-down`), indent by depth, click file → open note, click folder → toggle, selected highlight. Clean-room port of the cosmic-player *behavior* (GPL — imitate, don't copy); libcosmic MPL widgets only
-- [ ] 1.3 Tabs: multiple open notes via libcosmic `tab_bar` (`segmented_button::Model`, closable, per-tab `data = PathBuf`). Switching tabs saves + reloads (per-tab editor state later)
-- [ ] 1.4 Layout + state in `src/app.rs`: sidebar | divider | (tab bar + editor pane). Keep search + All/Pinned/Trash (segmented control in the sidebar); pinned shown with star; Trash as a collapsible section at the bottom. New messages: ToggleFolder / OpenNote / CloseTab / ActivateTab
-- [ ] 1.5 i18n keys in `i18n/en/cosmic_notes.ftl`
-- [ ] 1.6 Verify: `just lint`, `cargo test --all-features`, headless smoke; commit + push on `block-editor`
+- [x] 1.1 `src/notes/mod.rs`: add `Tree`/`TreeNode` model — recursive vault scan, folders-before-files, hidden/non-markdown excluded (same rules as `notes()`), rebuilt on vault mutations, unit tests
+- [x] 1.2 `src/sidebar.rs` (new): collapsible tree widget — chevron icons (`go-next`/`go-down`), indent by depth, click file → open note, click folder → toggle, selected highlight. Clean-room port of the cosmic-player *behavior* (GPL — imitate, don't copy); libcosmic MPL widgets only
+- [x] 1.3 Tabs: multiple open notes via libcosmic `tab_bar` (`segmented_button::Model`, closable, per-tab `data = PathBuf`). Switching tabs saves + reloads (per-tab editor state later)
+- [x] 1.4 Layout + state in `src/app.rs`: sidebar | divider | (tab bar + editor pane). Keep search + All/Pinned/Trash (segmented control in the sidebar); pinned shown with star; Trash as a collapsible section at the bottom. New messages: ToggleFolder / OpenNote / CloseTab / ActivateTab
+- [x] 1.5 i18n keys in `i18n/en/cosmic_notes.ftl`
+- [x] 1.6 Verify: `just lint`, `cargo test --all-features`, headless smoke; commit + push on `block-editor`
 
 *Backlog* (not yet scheduled)
 - [ ] Editor: drag-reorder block handles (`reorderable_flex_row` + `dnd_source`/`dnd_destination`)
 - [x] Editor: space on `[ ]`/`[x]` marker toggles todo (done by parallel agent — working tree, uncommitted)
 - [ ] Editor: multi-block select/operate (Shift+arrows, cut/copy/delete)
-- [ ] Editor: `[[backlinks]]` across the vault
+- [x] Editor: `[[backlinks]]` across the vault — core module (`src/backlinks.rs`) + UI panel under the editor, click → `SelectNote(to)`
 - [ ] Editor: images/attachments
 - [ ] Tabs: per-tab editor state (blocks + undo/redo per open note, no save/reload on switch)
 
@@ -46,3 +46,4 @@ Original request: like cosmic-player shows opened folder contents in the side pa
 - [x] Multi-line paste splits into blocks (markdown-aware: paste a list → list blocks)
 - [x] Ordered-list renumbering on structural changes
 - [x] Slash-command menu (`/` in empty paragraph; ↑/↓/Enter/Esc; 10 block kinds)
+- [x] Sidebar with collapsible directory tree + tabs (Item 1)

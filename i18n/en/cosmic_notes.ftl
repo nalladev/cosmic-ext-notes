@@ -60,3 +60,4 @@ inline-code = Inline code
 strikethrough = Strikethrough
 indent = Increase indentation
 outdent = Decrease indentation
+backlinks = Backlinks

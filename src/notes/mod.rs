@@ -10,6 +10,8 @@
 //! This module is intentionally free of any UI or COSMIC dependencies so that it
 //! can be unit-tested in isolation.
 
+use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -172,6 +174,8 @@ pub struct Vault {
     /// All notes (including trashed ones), sorted: pinned first, then by
     /// modification time descending, then by title.
     notes: Vec<Note>,
+    /// The directory structure of the vault, rebuilt whenever notes change.
+    tree: Tree,
 }
 
 impl Vault {
@@ -197,8 +201,14 @@ impl Vault {
                 .then_with(|| b.modified.cmp(&a.modified))
                 .then_with(|| a.title.cmp(&b.title))
         });
+        let tree = build_tree(&root)?;
 
-        Ok(Self { root, trash, notes })
+        Ok(Self {
+            root,
+            trash,
+            notes,
+            tree,
+        })
     }
 
     /// All notes, including trashed ones.
@@ -228,6 +238,7 @@ impl Vault {
         let note = Note::from_text(path, text);
         self.notes.push(note.clone());
         self.sort_notes();
+        self.rebuild_tree();
         Ok(Some(note))
     }
 
@@ -254,6 +265,7 @@ impl Vault {
             let conflict = conflict_path(&note.path);
             write_atomic(&conflict, &new_text)?;
             note.reload_from(&disk_text);
+            self.rebuild_tree();
             return Ok(Some(SaveOutcome::ConflictCopy { path: conflict }));
         }
 
@@ -293,6 +305,7 @@ impl Vault {
             .unwrap_or_default();
         let updated = note.clone();
         self.sort_notes();
+        self.rebuild_tree();
         Ok(Some(updated))
     }
 
@@ -368,6 +381,7 @@ impl Vault {
         note.path = new_path;
         let updated = note.clone();
         self.sort_notes();
+        self.rebuild_tree();
         Ok(Some(updated))
     }
 
@@ -390,6 +404,7 @@ impl Vault {
         note.path = new_path;
         let updated = note.clone();
         self.sort_notes();
+        self.rebuild_tree();
         Ok(Some(updated))
     }
 
@@ -406,6 +421,7 @@ impl Vault {
         let path = self.notes[index].path.clone();
         fs::remove_file(&path)?;
         self.notes.remove(index);
+        self.rebuild_tree();
         Ok(true)
     }
 
@@ -428,6 +444,9 @@ impl Vault {
             } else {
                 index += 1;
             }
+        }
+        if deleted > 0 {
+            self.rebuild_tree();
         }
         Ok(deleted)
     }
@@ -458,6 +477,170 @@ impl Vault {
                 .then_with(|| a.title.cmp(&b.title))
         });
     }
+
+    /// The directory tree of the vault, rebuilt whenever the notes change.
+    #[must_use]
+    pub fn tree(&self) -> &Tree {
+        &self.tree
+    }
+
+    /// Rebuilds the directory tree from the current state of the vault on disk.
+    fn rebuild_tree(&mut self) {
+        self.tree = build_tree(&self.root).unwrap_or_default();
+    }
+}
+
+/// A node in the vault's directory tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TreeNode {
+    /// A directory that may contain notes and further directories.
+    Folder {
+        /// The directory name.
+        name: String,
+        /// The absolute path of the directory.
+        path: PathBuf,
+    },
+    /// A single note file.
+    File {
+        /// The note title (the file stem).
+        name: String,
+        /// The absolute path of the file.
+        path: PathBuf,
+    },
+}
+
+impl TreeNode {
+    /// The display name: the directory name or the note title.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Folder { name, .. } | Self::File { name, .. } => name,
+        }
+    }
+
+    /// The absolute path of this node.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Folder { path, .. } | Self::File { path, .. } => path,
+        }
+    }
+
+    /// Whether this node is a directory.
+    #[must_use]
+    pub fn is_folder(&self) -> bool {
+        matches!(self, Self::Folder { .. })
+    }
+}
+
+/// A snapshot of the vault's directory structure.
+///
+/// The tree is a pure view of the vault on disk: it holds no UI state. The
+/// expansion state of folders is tracked by the application instead, so the
+/// tree can be rebuilt freely whenever notes change.
+#[derive(Debug, Clone, Default)]
+pub struct Tree {
+    /// The children of the vault root.
+    root: Vec<TreeNode>,
+    /// The children of every directory, keyed by its path.
+    children: HashMap<PathBuf, Vec<TreeNode>>,
+}
+
+impl Tree {
+    /// The top-level nodes of the vault.
+    #[must_use]
+    pub fn root(&self) -> &[TreeNode] {
+        &self.root
+    }
+
+    /// The children of the directory with the given path, if it is known.
+    #[must_use]
+    pub fn children_of(&self, path: &Path) -> Option<&[TreeNode]> {
+        self.children.get(path).map(Vec::as_slice)
+    }
+}
+
+/// Builds the directory tree of the vault rooted at `root`.
+///
+/// Hidden entries (which includes the trash directory) and anything that is
+/// neither a directory nor a markdown file are skipped, mirroring the rules of
+/// [`Vault::scan_dir`]. Folders always sort before files, then by name.
+fn build_tree(root: &Path) -> io::Result<Tree> {
+    let mut tree = Tree::default();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if is_hidden(&path) {
+            continue;
+        }
+        if path.is_dir() {
+            if let Ok(children) = scan_children(&path, &mut tree) {
+                tree.children.insert(path.clone(), children);
+            }
+            tree.root.push(TreeNode::Folder {
+                name: file_name(&path),
+                path,
+            });
+        } else if is_markdown(&path) {
+            tree.root.push(TreeNode::File {
+                name: file_stem(&path),
+                path,
+            });
+        }
+    }
+    tree.root.sort_by(sort_nodes);
+    Ok(tree)
+}
+
+/// Recursively scans a directory, returning its children and recording their
+/// descendants in `tree.children`.
+fn scan_children(dir: &Path, tree: &mut Tree) -> io::Result<Vec<TreeNode>> {
+    let mut nodes = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if is_hidden(&path) {
+            continue;
+        }
+        if path.is_dir() {
+            if let Ok(children) = scan_children(&path, tree) {
+                tree.children.insert(path.clone(), children);
+            }
+            nodes.push(TreeNode::Folder {
+                name: file_name(&path),
+                path,
+            });
+        } else if is_markdown(&path) {
+            nodes.push(TreeNode::File {
+                name: file_stem(&path),
+                path,
+            });
+        }
+    }
+    nodes.sort_by(sort_nodes);
+    Ok(nodes)
+}
+
+/// Orders tree nodes: directories before files, then by name (case-insensitive).
+fn sort_nodes(a: &TreeNode, b: &TreeNode) -> Ordering {
+    a.is_folder()
+        .cmp(&b.is_folder())
+        .reverse()
+        .then_with(|| a.name().to_lowercase().cmp(&b.name().to_lowercase()))
+}
+
+/// The file name of a path, as a string.
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// The file stem of a path, as a string.
+fn file_stem(path: &Path) -> String {
+    path.file_stem()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// A minimal YAML-like frontmatter block delimited by `---` lines.
@@ -1033,5 +1216,96 @@ mod tests {
 
         let titles: Vec<&str> = vault.notes().iter().map(Note::title).collect();
         assert_eq!(titles, vec!["B", "C", "A"]);
+    }
+
+    #[test]
+    fn tree_mirrors_disk_structure() {
+        let dir = temp_dir();
+        fs::create_dir(dir.join("Projects")).expect("mkdir");
+        fs::create_dir(dir.join("Projects").join("Ideas")).expect("mkdir");
+        fs::write(dir.join("Projects").join("Ideas").join("Draft.md"), "draft").expect("write");
+        fs::write(dir.join("Projects").join("Readme.md"), "readme").expect("write");
+        fs::write(dir.join("Shopping.md"), "shopping").expect("write");
+
+        let vault = Vault::open(&dir).expect("open");
+        let tree = vault.tree();
+
+        let root: Vec<&str> = tree.root().iter().map(TreeNode::name).collect();
+        // Folders sort before files.
+        assert_eq!(root, vec!["Projects", "Shopping"]);
+
+        let projects = tree
+            .root()
+            .iter()
+            .find(|node| node.name() == "Projects")
+            .expect("projects folder");
+        let projects_children: Vec<&str> = tree
+            .children_of(projects.path())
+            .expect("children")
+            .iter()
+            .map(TreeNode::name)
+            .collect();
+        assert_eq!(projects_children, vec!["Ideas", "Readme"]);
+
+        let ideas = tree
+            .children_of(projects.path())
+            .expect("children")
+            .iter()
+            .find(|node| node.name() == "Ideas")
+            .expect("ideas folder");
+        let ideas_children: Vec<&str> = tree
+            .children_of(ideas.path())
+            .expect("children")
+            .iter()
+            .map(TreeNode::name)
+            .collect();
+        assert_eq!(ideas_children, vec!["Draft"]);
+    }
+
+    #[test]
+    fn tree_excludes_hidden_and_non_markdown() {
+        let dir = temp_dir();
+        fs::create_dir(dir.join(".secret")).expect("mkdir");
+        fs::write(dir.join(".secret").join("Note.md"), "ignored").expect("write");
+        fs::write(dir.join(".hidden.md"), "ignored").expect("write");
+        fs::write(dir.join("readme.txt"), "ignored").expect("write");
+
+        let vault = Vault::open(&dir).expect("open");
+        assert!(vault.tree().root().is_empty());
+    }
+
+    #[test]
+    fn tree_updates_on_mutation() {
+        let dir = temp_dir();
+        let mut vault = Vault::open(&dir).expect("open");
+
+        let note = vault.create("Draft").expect("create").expect("title");
+        let root: Vec<&str> = vault.tree().root().iter().map(TreeNode::name).collect();
+        assert_eq!(root, vec!["Draft"]);
+
+        // Trashing removes the note from the tree (the trash dir is hidden).
+        let trashed = vault.trash(note.path()).expect("trash").expect("note");
+        assert!(vault.tree().root().is_empty());
+
+        // Restoring puts it back.
+        vault
+            .restore(trashed.path())
+            .expect("restore")
+            .expect("note");
+        let root: Vec<&str> = vault.tree().root().iter().map(TreeNode::name).collect();
+        assert_eq!(root, vec!["Draft"]);
+    }
+
+    #[test]
+    fn tree_sorts_folders_before_files_by_name() {
+        let dir = temp_dir();
+        fs::create_dir(dir.join("Zeta")).expect("mkdir");
+        fs::write(dir.join("alpha.md"), "a").expect("write");
+        fs::write(dir.join("Beta.md"), "b").expect("write");
+
+        let vault = Vault::open(&dir).expect("open");
+        let root: Vec<&str> = vault.tree().root().iter().map(TreeNode::name).collect();
+        // Folder first despite sorting after "alpha" alphabetically.
+        assert_eq!(root, vec!["Zeta", "alpha", "Beta"]);
     }
 }

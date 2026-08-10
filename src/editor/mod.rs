@@ -496,10 +496,25 @@ pub(crate) fn prefix_kind(text: &str) -> Option<BlockKind> {
     None
 }
 
+/// Whether pressing Space should toggle a todo block's checkbox: the caret is
+/// at the very start of the content, immediately after the `[ ]`/`[x]` marker
+/// rendered to the left of the editor, and there is no text selected (a
+/// selection would otherwise be replaced by the space).
+#[must_use]
+pub(crate) fn space_toggles_todo(
+    kind: &BlockKind,
+    line: usize,
+    column: usize,
+    has_selection: bool,
+) -> bool {
+    matches!(kind, BlockKind::Todo(..)) && !has_selection && line == 0 && column == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Block, BlockKind, is_divider, parse_markdown, prefix_kind, serialize_markdown, wrap_inline,
+        Block, BlockKind, is_divider, parse_markdown, prefix_kind, serialize_markdown,
+        space_toggles_todo, wrap_inline,
     };
 
     /// Asserts that parsing and re-serializing is the identity for text that
@@ -821,5 +836,31 @@ mod tests {
         let result = wrap_inline("aé", Some((1, 2)), 1, "**", "**");
         assert_eq!(result.text, "a****é");
         assert_eq!(result.caret, 5);
+    }
+
+    #[test]
+    fn space_toggles_todo_at_the_marker() {
+        assert!(space_toggles_todo(&BlockKind::Todo(0, false), 0, 0, false));
+        assert!(space_toggles_todo(&BlockKind::Todo(2, true), 0, 0, false));
+    }
+
+    #[test]
+    fn space_types_in_todos_outside_the_marker() {
+        // A space in the middle of the content is a normal space.
+        assert!(!space_toggles_todo(&BlockKind::Todo(0, false), 0, 1, false));
+        assert!(!space_toggles_todo(&BlockKind::Todo(0, false), 1, 0, false));
+    }
+
+    #[test]
+    fn space_does_not_toggle_with_a_selection() {
+        // A selection is replaced by the space instead.
+        assert!(!space_toggles_todo(&BlockKind::Todo(0, false), 0, 0, true));
+    }
+
+    #[test]
+    fn space_does_not_toggle_other_block_kinds() {
+        assert!(!space_toggles_todo(&BlockKind::Paragraph, 0, 0, false));
+        assert!(!space_toggles_todo(&BlockKind::Bullet(0), 0, 0, false));
+        assert!(!space_toggles_todo(&BlockKind::Numbered(0, 1), 0, 0, false));
     }
 }
