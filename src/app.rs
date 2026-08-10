@@ -17,13 +17,18 @@ use cosmic::widget::{
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const APP_ICON: &[u8] = include_bytes!("../resources/icon.svg");
 
 /// How often the autosave tick fires.
 const AUTOSAVE_INTERVAL: Duration = Duration::from_millis(500);
+/// How long consecutive typing in one block stays coalesced into a single
+/// undo step.
+const UNDO_COALESCE: Duration = Duration::from_millis(800);
+/// The maximum number of undo snapshots kept per note.
+const UNDO_LIMIT: usize = 100;
 /// Widget id of the search input.
 const SEARCH_ID: &str = "notes-search";
 /// Widget id of the note title input.
@@ -53,6 +58,13 @@ pub struct AppModel {
     blocks: Vec<EditableBlock>,
     /// The index of the block the toolbar acts on (the last one focused).
     selected_block: usize,
+    /// Undo history: snapshots of the whole document, newest last.
+    undo_stack: Vec<Vec<editor::Block>>,
+    /// Redo history, cleared by any new edit.
+    redo_stack: Vec<Vec<editor::Block>>,
+    /// When the last undo snapshot was taken and in which block, so that
+    /// bursts of typing collapse into a single undo step.
+    last_undo_at: Option<(Instant, usize)>,
     /// The title being edited for the active note.
     title_draft: String,
     /// Whether the editor has unsaved changes.
@@ -156,6 +168,10 @@ pub enum Message {
     /// Convert the block into a divider and move focus below it (typed
     /// `---` followed by Enter).
     InsertDivider(usize),
+    /// Undo the last document-wide change (Ctrl+Z).
+    Undo,
+    /// Redo the last undone change (Ctrl+Shift+Z or Ctrl+Y).
+    Redo,
     /// Toggle between the editor and the markdown preview.
     TogglePreview,
     /// A link was clicked in the markdown preview.
@@ -335,6 +351,9 @@ impl cosmic::Application for AppModel {
             selected: None,
             blocks: Vec::new(),
             selected_block: 0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            last_undo_at: None,
             title_draft: String::new(),
             dirty: false,
             preview: false,
@@ -655,6 +674,9 @@ impl cosmic::Application for AppModel {
             Message::BlockAction { index, action } => {
                 self.selected_block = index;
                 let is_edit = action.is_edit();
+                if is_edit {
+                    self.push_undo(index);
+                }
                 let Some(block) = self.blocks.get_mut(index) else {
                     return Task::none();
                 };
@@ -667,6 +689,7 @@ impl cosmic::Application for AppModel {
 
             Message::ToggleTodo(index) => {
                 self.selected_block = index;
+                self.push_undo_step();
                 let Some(block) = self.blocks.get_mut(index) else {
                     return Task::none();
                 };
@@ -683,6 +706,7 @@ impl cosmic::Application for AppModel {
                 before,
                 after,
             } => {
+                self.push_undo_step();
                 let Some(block) = self.blocks.get_mut(index) else {
                     return Task::none();
                 };
@@ -708,6 +732,7 @@ impl cosmic::Application for AppModel {
                 content,
             } => {
                 self.selected_block = index;
+                self.push_undo_step();
                 let Some(block) = self.blocks.get_mut(index) else {
                     return Task::none();
                 };
@@ -719,6 +744,7 @@ impl cosmic::Application for AppModel {
 
             Message::ChangeLevel { index, delta } => {
                 self.selected_block = index;
+                self.push_undo_step();
                 let Some(block) = self.blocks.get_mut(index) else {
                     return Task::none();
                 };
@@ -734,6 +760,7 @@ impl cosmic::Application for AppModel {
                 if index == 0 || index >= self.blocks.len() {
                     return Task::none();
                 }
+                self.push_undo_step();
                 let merged = self.blocks.remove(index);
                 let Some(prev) = self.blocks.get_mut(index - 1) else {
                     return Task::none();
@@ -785,6 +812,7 @@ impl cosmic::Application for AppModel {
 
             Message::WrapInline { index, marker } => {
                 self.selected_block = index;
+                self.push_undo_step();
                 let Some(block) = self.blocks.get_mut(index) else {
                     return Task::none();
                 };
@@ -840,6 +868,24 @@ impl cosmic::Application for AppModel {
                     self.format_block(index, BlockKind::Divider),
                     self.update_title(),
                 ])
+            }
+
+            Message::Undo => {
+                let Some(previous) = self.undo_stack.pop() else {
+                    return Task::none();
+                };
+                let current = self.snapshot_blocks();
+                self.redo_stack.push(current);
+                self.restore_blocks(previous)
+            }
+
+            Message::Redo => {
+                let Some(next) = self.redo_stack.pop() else {
+                    return Task::none();
+                };
+                let current = self.snapshot_blocks();
+                self.undo_stack.push(current);
+                self.restore_blocks(next)
             }
 
             Message::TogglePreview => {
@@ -953,6 +999,9 @@ impl AppModel {
         }
         self.blocks = blocks;
         self.selected_block = 0;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.last_undo_at = None;
         title.clone_into(&mut self.title_draft);
         self.preview = preview;
         self.dirty = false;
@@ -962,6 +1011,9 @@ impl AppModel {
     /// Empties the editor and clears the title.
     fn clear_editor(&mut self) {
         self.blocks.clear();
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.last_undo_at = None;
         self.title_draft.clear();
         self.dirty = false;
         self.markdown = None;
@@ -1670,6 +1722,25 @@ impl AppModel {
         }
     }
 
+    /// The document-wide undo/redo binding for a key press, if it matches
+    /// Ctrl+Z (undo) or Ctrl+Shift+Z / Ctrl+Y (redo). Returns `None` for
+    /// anything else.
+    fn undo_redo_binding(
+        key_press: &text_editor::KeyPress,
+    ) -> Option<text_editor::Binding<Message>> {
+        use cosmic::widget::text_editor::Binding;
+        if !key_press.modifiers.control() {
+            return None;
+        }
+        match (key_press.modified_key.as_ref(), key_press.modifiers.shift()) {
+            (Key::Character("z"), false) => Some(Binding::Custom(Message::Undo)),
+            (Key::Character("z"), true) | (Key::Character("y"), false) => {
+                Some(Binding::Custom(Message::Redo))
+            }
+            _ => None,
+        }
+    }
+
     /// Maps a key press in a block's editor to a block-level behavior, falling
     /// back to the default text editor binding.
     ///
@@ -1688,6 +1759,13 @@ impl AppModel {
         // Only intercept keys while the editor is focused.
         if !matches!(key_press.status, Status::Focused { .. }) {
             return Binding::from_key_press(key_press);
+        }
+
+        // Document-wide undo/redo: the editor's own Ctrl+Z only rewinds the
+        // focused block, so intercept it here (code blocks included, which
+        // would otherwise keep their per-block history).
+        if let Some(binding) = Self::undo_redo_binding(&key_press) {
+            return Some(binding);
         }
 
         // Code blocks keep their own newlines; dividers have no editor. In
@@ -1923,17 +2001,87 @@ impl AppModel {
         )
     }
 
+    /// A snapshot of the whole document for undo/redo, rebuilt from the
+    /// editable blocks as pure model blocks.
+    fn snapshot_blocks(&self) -> Vec<editor::Block> {
+        self.blocks.iter().map(EditableBlock::to_block).collect()
+    }
+
+    /// Whether a new edit should start an undo step, given when the previous
+    /// one was recorded. Typing bursts in the same block collapse into one
+    /// step; anything else (time passing, another block) starts a new one.
+    fn should_snapshot(last: Option<(Instant, usize)>, now: Instant, index: usize) -> bool {
+        last.is_none_or(|(at, last_index)| {
+            now.duration_since(at) >= UNDO_COALESCE || last_index != index
+        })
+    }
+
+    /// Pushes a snapshot of the current document and clears the redo stack.
+    fn record_snapshot(&mut self) {
+        self.undo_stack.push(self.snapshot_blocks());
+        if self.undo_stack.len() > UNDO_LIMIT {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    /// Records the current document as an undo step before an edit in the
+    /// given block, coalescing bursts of typing into a single step.
+    fn push_undo(&mut self, block_index: usize) {
+        let now = Instant::now();
+        if !Self::should_snapshot(self.last_undo_at, now, block_index) {
+            return;
+        }
+        self.record_snapshot();
+        self.last_undo_at = Some((now, block_index));
+    }
+
+    /// Records the current document as its own undo step for a structural
+    /// change (split, convert, ...) and breaks the typing coalescing window
+    /// so the following keystrokes start a fresh step.
+    fn push_undo_step(&mut self) {
+        self.record_snapshot();
+        self.last_undo_at = None;
+    }
+
+    /// Replaces the document with the given snapshot, places the caret at
+    /// the end of `selected_block` (clamped to the restored document), and
+    /// returns a task that refocuses the editor and refreshes the title.
+    fn restore_blocks(&mut self, snapshot: Vec<editor::Block>) -> Task<cosmic::Action<Message>> {
+        self.blocks = snapshot
+            .into_iter()
+            .map(EditableBlock::from_block)
+            .collect();
+        self.last_undo_at = None;
+        let index = self.selected_block.min(self.blocks.len().saturating_sub(1));
+        self.selected_block = index;
+        if let Some(block) = self.blocks.get_mut(index) {
+            let cursor = Self::end_cursor(&block.content);
+            block.content.move_to(cursor);
+        }
+        self.mark_dirty();
+        Task::batch([
+            Self::focus_block(index).map(cosmic::action::app),
+            self.update_title(),
+        ])
+    }
+
     /// Converts the block at `index` to `kind`, keeping its text (dividers
     /// drop it), and returns a task that moves focus back into the document:
     /// the converted block, or the next editable block after a divider
     /// (inserting an empty paragraph when there is nowhere to type).
     fn format_block(&mut self, index: usize, kind: BlockKind) -> Task<cosmic::Action<Message>> {
+        if self
+            .blocks
+            .get(index)
+            .is_none_or(|block| block.kind == kind)
+        {
+            return Task::none();
+        }
+        self.push_undo_step();
         let Some(block) = self.blocks.get_mut(index) else {
             return Task::none();
         };
-        if block.kind == kind {
-            return Task::none();
-        }
         let is_divider = matches!(kind, BlockKind::Divider);
         let text = block.content.text();
         block.kind = kind;
@@ -2150,8 +2298,9 @@ fn split_at(text: &str, column: usize) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppModel, split_at};
+    use super::{AppModel, UNDO_COALESCE, split_at};
     use crate::editor::BlockKind;
+    use std::time::Instant;
 
     #[test]
     fn split_at_clamps_to_char_boundaries() {
@@ -2193,5 +2342,22 @@ mod tests {
         assert_eq!(AppModel::shift_level(&BlockKind::Paragraph, 1), None);
         assert_eq!(AppModel::shift_level(&BlockKind::Heading(2), 1), None);
         assert_eq!(AppModel::shift_level(&BlockKind::Divider, 1), None);
+    }
+
+    #[test]
+    fn undo_coalesces_typing_in_one_block() {
+        let now = Instant::now();
+        // No previous snapshot: start a step.
+        assert!(AppModel::should_snapshot(None, now, 0));
+        // A recent snapshot in the same block coalesces.
+        assert!(!AppModel::should_snapshot(Some((now, 0)), now, 0));
+        // A recent snapshot in another block starts a new step.
+        assert!(AppModel::should_snapshot(Some((now, 0)), now, 1));
+        // Enough time passing starts a new step even in the same block.
+        assert!(AppModel::should_snapshot(
+            Some((now, 0)),
+            now + UNDO_COALESCE,
+            0
+        ));
     }
 }
