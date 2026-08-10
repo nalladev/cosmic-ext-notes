@@ -13,7 +13,7 @@ use cosmic::iced::{Alignment, Length, Subscription, event, keyboard};
 use cosmic::prelude::*;
 use cosmic::widget::{
     self, Toasts, about::About, button, dialog, divider, icon, list_column, markdown, menu,
-    nav_bar, text_editor, text_input, toaster, tooltip,
+    nav_bar, popover, text_editor, text_input, toaster, tooltip,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -29,6 +29,69 @@ const AUTOSAVE_INTERVAL: Duration = Duration::from_millis(500);
 const UNDO_COALESCE: Duration = Duration::from_millis(800);
 /// The maximum number of undo snapshots kept per note.
 const UNDO_LIMIT: usize = 100;
+/// An entry in the slash command menu.
+struct SlashItem {
+    /// The kind the block converts to.
+    kind: BlockKind,
+    /// The toolbar icon name for the entry.
+    icon: &'static str,
+    /// The i18n key of the entry label.
+    label: &'static str,
+}
+
+/// The slash command menu entries, in display order.
+const SLASH_ITEMS: &[SlashItem] = &[
+    SlashItem {
+        kind: BlockKind::Paragraph,
+        icon: "format-justify-left-symbolic",
+        label: "paragraph",
+    },
+    SlashItem {
+        kind: BlockKind::Heading(1),
+        icon: "format-text-heading-1-symbolic",
+        label: "heading-1",
+    },
+    SlashItem {
+        kind: BlockKind::Heading(2),
+        icon: "format-text-heading-2-symbolic",
+        label: "heading-2",
+    },
+    SlashItem {
+        kind: BlockKind::Heading(3),
+        icon: "format-text-heading-3-symbolic",
+        label: "heading-3",
+    },
+    SlashItem {
+        kind: BlockKind::Bullet(0),
+        icon: "format-list-unordered-symbolic",
+        label: "bullet-list",
+    },
+    SlashItem {
+        kind: BlockKind::Numbered(0, 1),
+        icon: "format-list-ordered-symbolic",
+        label: "numbered-list",
+    },
+    SlashItem {
+        kind: BlockKind::Todo(0, false),
+        icon: "format-list-checkbox-symbolic",
+        label: "todo-list",
+    },
+    SlashItem {
+        kind: BlockKind::Quote(0),
+        icon: "format-quote-block-symbolic",
+        label: "quote",
+    },
+    SlashItem {
+        kind: BlockKind::Code(String::new()),
+        icon: "format-text-code-symbolic",
+        label: "code-block",
+    },
+    SlashItem {
+        kind: BlockKind::Divider,
+        icon: "insert-horizontal-rule-symbolic",
+        label: "divider",
+    },
+];
 /// Widget id of the search input.
 const SEARCH_ID: &str = "notes-search";
 /// Widget id of the note title input.
@@ -65,6 +128,10 @@ pub struct AppModel {
     /// When the last undo snapshot was taken and in which block, so that
     /// bursts of typing collapse into a single undo step.
     last_undo_at: Option<(Instant, usize)>,
+    /// The block index whose slash command menu is open, if any.
+    slash_menu: Option<usize>,
+    /// The highlighted entry of the open slash menu.
+    slash_selection: usize,
     /// The title being edited for the active note.
     title_draft: String,
     /// Whether the editor has unsaved changes.
@@ -172,6 +239,22 @@ pub enum Message {
     Undo,
     /// Redo the last undone change (Ctrl+Shift+Z or Ctrl+Y).
     Redo,
+    /// Open the slash command menu for the block with the given index
+    /// (typed `/` in an empty paragraph).
+    SlashMenuOpen(usize),
+    /// Close the slash command menu without applying anything.
+    SlashMenuClose,
+    /// Move the slash menu highlight by the given delta (-1 or 1).
+    SlashMenuMove(i8),
+    /// Apply the highlighted slash menu entry.
+    SlashMenuSelect,
+    /// Apply the slash menu entry for the given block kind, closing the menu.
+    SlashMenuPick {
+        /// The block to convert.
+        index: usize,
+        /// The kind to convert it to.
+        kind: BlockKind,
+    },
     /// Toggle between the editor and the markdown preview.
     TogglePreview,
     /// A link was clicked in the markdown preview.
@@ -354,6 +437,8 @@ impl cosmic::Application for AppModel {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_undo_at: None,
+            slash_menu: None,
+            slash_selection: 0,
             title_draft: String::new(),
             dirty: false,
             preview: false,
@@ -898,6 +983,45 @@ impl cosmic::Application for AppModel {
                 self.restore_blocks(next)
             }
 
+            Message::SlashMenuOpen(index) => {
+                self.slash_menu = Some(index);
+                self.slash_selection = 0;
+                self.selected_block = index;
+                Task::none()
+            }
+
+            Message::SlashMenuClose => {
+                self.slash_menu = None;
+                Task::none()
+            }
+
+            Message::SlashMenuMove(delta) => {
+                if self.slash_menu.is_none() {
+                    return Task::none();
+                }
+                self.slash_selection = if delta > 0 {
+                    (self.slash_selection + 1).min(SLASH_ITEMS.len() - 1)
+                } else {
+                    self.slash_selection.saturating_sub(1)
+                };
+                Task::none()
+            }
+
+            Message::SlashMenuSelect => {
+                let Some(index) = self.slash_menu.take() else {
+                    return Task::none();
+                };
+                let kind = SLASH_ITEMS[self.slash_selection].kind.clone();
+                self.selected_block = index;
+                Task::batch([self.format_block(index, kind), self.update_title()])
+            }
+
+            Message::SlashMenuPick { index, kind } => {
+                self.slash_menu = None;
+                self.selected_block = index;
+                Task::batch([self.format_block(index, kind), self.update_title()])
+            }
+
             Message::TogglePreview => {
                 self.preview = !self.preview;
                 if self.preview && self.markdown.is_none() {
@@ -1012,6 +1136,7 @@ impl AppModel {
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.last_undo_at = None;
+        self.slash_menu = None;
         title.clone_into(&mut self.title_draft);
         self.preview = preview;
         self.dirty = false;
@@ -1024,6 +1149,7 @@ impl AppModel {
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.last_undo_at = None;
+        self.slash_menu = None;
         self.title_draft.clear();
         self.dirty = false;
         self.markdown = None;
@@ -1377,7 +1503,13 @@ impl AppModel {
         let spacing = cosmic::theme::spacing();
         let mut column = widget::column::with_capacity(self.blocks.len());
         for (index, block) in self.blocks.iter().enumerate() {
-            column = column.push(Self::block_element(index, block, &self.blocks));
+            column = column.push(Self::block_element(
+                index,
+                block,
+                &self.blocks,
+                self.slash_menu == Some(index),
+                self.slash_selection,
+            ));
         }
         widget::scrollable(
             widget::container(column.spacing(0))
@@ -1388,24 +1520,29 @@ impl AppModel {
         .into()
     }
 
-    /// Renders a single block as an editable widget.
+    /// Renders a single block as an editable widget, wrapped in the slash
+    /// command popover when it is open for that block.
     fn block_element<'a>(
         index: usize,
         block: &'a EditableBlock,
         blocks: &'a [EditableBlock],
+        slash_open: bool,
+        slash_selection: usize,
     ) -> Element<'a, Message> {
         let spacing = cosmic::theme::spacing();
         let mut editor = cosmic::widget::text_editor(&block.content)
             .id(cosmic::widget::Id::new(format!("block-{index}")))
             .on_action(move |action| Message::BlockAction { index, action })
-            .key_binding(move |key_press| Self::block_key_binding(index, block, blocks, key_press))
+            .key_binding(move |key_press| {
+                Self::block_key_binding(index, block, blocks, key_press, slash_open)
+            })
             .highlight("markdown", Self::highlight_theme())
             .size(15)
             .padding([spacing.space_xxs, 0]);
         if index == 0 {
             editor = editor.placeholder(fl!("note-placeholder"));
         }
-        match &block.kind {
+        let element: Element<'a, Message> = match &block.kind {
             BlockKind::Paragraph => editor.into(),
             BlockKind::Heading(level) => editor
                 .font(cosmic::font::semibold())
@@ -1442,6 +1579,62 @@ impl AppModel {
                 .padding([spacing.space_s, 0])
                 .width(Length::Fill)
                 .into(),
+        };
+        if slash_open {
+            let popup = Self::slash_menu_element(index, slash_selection);
+            return popover::popover(element)
+                .position(popover::Position::Bottom)
+                .on_close(Message::SlashMenuClose)
+                .popup(popup)
+                .into();
+        }
+        element
+    }
+
+    /// The slash command menu popup: the block-style conversions, with the
+    /// highlighted entry marked.
+    fn slash_menu_element(index: usize, selection: usize) -> Element<'static, Message> {
+        let spacing = cosmic::theme::spacing();
+        let mut column =
+            widget::column::with_capacity(SLASH_ITEMS.len()).spacing(spacing.space_xxs);
+        for (i, item) in SLASH_ITEMS.iter().enumerate() {
+            let content = widget::row::with_capacity(2)
+                .push(icon::icon(Self::toolbar_icon(item.icon)).size(16))
+                .push(widget::text(Self::slash_label(item.label)))
+                .spacing(spacing.space_s)
+                .align_y(Alignment::Center);
+            column = column.push(
+                button::custom(content)
+                    .on_press(Message::SlashMenuPick {
+                        index,
+                        kind: item.kind.clone(),
+                    })
+                    .selected(i == selection)
+                    .class(cosmic::theme::Button::Text)
+                    .width(Length::Fill),
+            );
+        }
+        widget::container(column)
+            .class(cosmic::theme::Container::Card)
+            .padding([spacing.space_xs, spacing.space_s])
+            .into()
+    }
+
+    /// The localized label for a slash menu entry key.
+    #[must_use]
+    fn slash_label(key: &str) -> String {
+        match key {
+            "paragraph" => fl!("paragraph"),
+            "heading-1" => fl!("heading-1"),
+            "heading-2" => fl!("heading-2"),
+            "heading-3" => fl!("heading-3"),
+            "bullet-list" => fl!("bullet-list"),
+            "numbered-list" => fl!("numbered-list"),
+            "todo-list" => fl!("todo-list"),
+            "quote" => fl!("quote"),
+            "code-block" => fl!("code-block"),
+            "divider" => fl!("divider"),
+            _ => key.to_owned(),
         }
     }
 
@@ -1751,6 +1944,32 @@ impl AppModel {
         }
     }
 
+    /// The binding while the slash menu is open: navigation and selection,
+    /// swallowing all other keys so they do not reach the block editor.
+    fn slash_menu_binding(
+        key_press: &text_editor::KeyPress,
+    ) -> Option<text_editor::Binding<Message>> {
+        use cosmic::iced::keyboard::key::Named;
+        use cosmic::widget::text_editor::Binding;
+        match key_press.modified_key.as_ref() {
+            Key::Named(Named::Escape) => Some(Binding::Custom(Message::SlashMenuClose)),
+            Key::Named(Named::ArrowUp) => Some(Binding::Custom(Message::SlashMenuMove(-1))),
+            Key::Named(Named::ArrowDown) => Some(Binding::Custom(Message::SlashMenuMove(1))),
+            Key::Named(Named::Enter | Named::Tab) => {
+                Some(Binding::Custom(Message::SlashMenuSelect))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether typing the given character should open the slash menu: a `/`
+    /// at the start of an empty paragraph.
+    fn slash_trigger(block: &EditableBlock, text: Option<&str>) -> bool {
+        matches!(block.kind, BlockKind::Paragraph)
+            && block.content.text().is_empty()
+            && text == Some("/")
+    }
+
     /// Maps a key press in a block's editor to a block-level behavior, falling
     /// back to the default text editor binding.
     ///
@@ -1762,6 +1981,7 @@ impl AppModel {
         block: &EditableBlock,
         blocks: &[EditableBlock],
         key_press: text_editor::KeyPress,
+        slash_open: bool,
     ) -> Option<text_editor::Binding<Message>> {
         use cosmic::iced::keyboard::key::Named;
         use cosmic::widget::text_editor::{Binding, Status};
@@ -1769,6 +1989,11 @@ impl AppModel {
         // Only intercept keys while the editor is focused.
         if !matches!(key_press.status, Status::Focused { .. }) {
             return Binding::from_key_press(key_press);
+        }
+
+        // While the slash menu is open for this block, it owns the keyboard.
+        if slash_open {
+            return Self::slash_menu_binding(&key_press);
         }
 
         // Document-wide undo/redo: the editor's own Ctrl+Z only rewinds the
@@ -1853,26 +2078,8 @@ impl AppModel {
                     _ => Binding::from_key_press(key_press),
                 }
             }
-            _ => {
-                if key_press.text.as_deref() == Some(" ") {
-                    // A space may complete a typed markdown prefix.
-                    if let Some(kind) = editor::prefix_kind(&block.content.text()) {
-                        return Some(Binding::Custom(Message::ConvertBlock {
-                            index,
-                            kind,
-                            content: String::new(),
-                        }));
-                    }
-                } else if key_press.text.as_deref() == Some("`") && block.content.text() == "``" {
-                    // Three backticks open a fenced code block.
-                    return Some(Binding::Custom(Message::ConvertBlock {
-                        index,
-                        kind: BlockKind::Code(String::new()),
-                        content: String::new(),
-                    }));
-                }
-                Binding::from_key_press(key_press)
-            }
+            _ => Self::prefix_binding(index, block, &key_press)
+                .or_else(|| Binding::from_key_press(key_press)),
         }
     }
 
@@ -1890,6 +2097,39 @@ impl AppModel {
             | BlockKind::Code(_)
             | BlockKind::Divider => None,
         }
+    }
+
+    /// The binding for a typed character that may start a block conversion:
+    /// a space completing a markdown prefix, three backticks opening a code
+    /// fence, or a slash opening the command menu. Returns `None` for any
+    /// other input.
+    fn prefix_binding(
+        index: usize,
+        block: &EditableBlock,
+        key_press: &text_editor::KeyPress,
+    ) -> Option<text_editor::Binding<Message>> {
+        use cosmic::widget::text_editor::Binding;
+        if key_press.text.as_deref() == Some(" ") {
+            // A space may complete a typed markdown prefix.
+            if let Some(kind) = editor::prefix_kind(&block.content.text()) {
+                return Some(Binding::Custom(Message::ConvertBlock {
+                    index,
+                    kind,
+                    content: String::new(),
+                }));
+            }
+        } else if key_press.text.as_deref() == Some("`") && block.content.text() == "``" {
+            // Three backticks open a fenced code block.
+            return Some(Binding::Custom(Message::ConvertBlock {
+                index,
+                kind: BlockKind::Code(String::new()),
+                content: String::new(),
+            }));
+        } else if Self::slash_trigger(block, key_press.text.as_deref()) {
+            // A slash in an empty paragraph opens the command menu.
+            return Some(Binding::Custom(Message::SlashMenuOpen(index)));
+        }
+        None
     }
 
     /// The binding for Backspace at the very start of a block: un-nests a
