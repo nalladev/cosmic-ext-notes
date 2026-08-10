@@ -1313,9 +1313,7 @@ impl AppModel {
         let mut editor = cosmic::widget::text_editor(&block.content)
             .id(cosmic::widget::Id::new(format!("block-{index}")))
             .on_action(move |action| Message::BlockAction { index, action })
-            .key_binding(move |key_press| {
-                Self::block_key_binding(index, block, blocks, key_press)
-            })
+            .key_binding(move |key_press| Self::block_key_binding(index, block, blocks, key_press))
             .highlight("markdown", Self::highlight_theme())
             .size(15)
             .padding([spacing.space_xxs, 0]);
@@ -1336,11 +1334,9 @@ impl AppModel {
             BlockKind::Bullet(_level) => {
                 Self::list_item(Self::indent(block.kind.level()), "•", editor)
             }
-            BlockKind::Numbered(_level, number) => Self::list_item(
-                Self::indent(block.kind.level()),
-                number.to_string(),
-                editor,
-            ),
+            BlockKind::Numbered(_level, number) => {
+                Self::list_item(Self::indent(block.kind.level()), number.to_string(), editor)
+            }
             BlockKind::Todo(_level, done) => {
                 let checkbox = cosmic::widget::checkbox(*done)
                     .size(16)
@@ -1352,13 +1348,11 @@ impl AppModel {
                     .align_y(Alignment::Center)
                     .into()
             }
-            BlockKind::Code(_lang) => {
-                widget::container(editor.font(cosmic::font::mono()))
-                    .class(cosmic::theme::Container::Card)
-                    .padding([spacing.space_xxs, spacing.space_xs])
-                    .width(Length::Fill)
-                    .into()
-            }
+            BlockKind::Code(_lang) => widget::container(editor.font(cosmic::font::mono()))
+                .class(cosmic::theme::Container::Card)
+                .padding([spacing.space_xxs, spacing.space_xs])
+                .width(Length::Fill)
+                .into(),
             BlockKind::Divider => widget::container(divider::horizontal::default())
                 .padding([spacing.space_s, 0])
                 .width(Length::Fill)
@@ -1414,15 +1408,18 @@ impl AppModel {
 
     /// A thin vertical accent stripe used as the quote block marker.
     fn quote_stripe() -> Element<'static, Message> {
-        let mut color: cosmic::iced::Color =
-            cosmic::theme::active().cosmic().accent.base.into();
+        let mut color: cosmic::iced::Color = cosmic::theme::active().cosmic().accent.base.into();
         color.a = 0.6;
-        widget::container(widget::space().width(Length::Fixed(3.0)).height(Length::Fill))
-            .style(move |_theme| cosmic::iced::widget::container::Style {
-                background: Some(cosmic::iced::Background::Color(color)),
-                ..Default::default()
-            })
-            .into()
+        widget::container(
+            widget::space()
+                .width(Length::Fixed(3.0))
+                .height(Length::Fill),
+        )
+        .style(move |_theme| cosmic::iced::widget::container::Style {
+            background: Some(cosmic::iced::Background::Color(color)),
+            ..Default::default()
+        })
+        .into()
     }
 
     /// The formatting toolbar for the selected block: block-style conversions
@@ -1628,15 +1625,9 @@ impl AppModel {
 
         // Code blocks keep their own newlines; dividers have no editor. In
         // code, Tab inserts a literal tab.
-        if matches!(
-            block.kind,
-            BlockKind::Code(_) | BlockKind::Divider
-        ) {
+        if matches!(block.kind, BlockKind::Code(_) | BlockKind::Divider) {
             if matches!(block.kind, BlockKind::Code(_))
-                && matches!(
-                    key_press.modified_key.as_ref(),
-                    Key::Named(Named::Tab)
-                )
+                && matches!(key_press.modified_key.as_ref(), Key::Named(Named::Tab))
                 && !key_press.modifiers.shift()
             {
                 return Some(text_editor::Binding::Insert('\t'));
@@ -1648,9 +1639,7 @@ impl AppModel {
         let position = cursor.position;
 
         match key_press.modified_key.as_ref() {
-            Key::Named(Named::Enter) => {
-                Some(Self::enter_binding(index, block))
-            }
+            Key::Named(Named::Enter) => Some(Self::enter_binding(index, block)),
             Key::Named(Named::Backspace) => {
                 if position.line != 0 || position.column != 0 {
                     // Not at the start of the block: default backspace.
@@ -1715,9 +1704,7 @@ impl AppModel {
                             content: String::new(),
                         }));
                     }
-                } else if key_press.text.as_deref() == Some("`")
-                    && block.content.text() == "``"
-                {
+                } else if key_press.text.as_deref() == Some("`") && block.content.text() == "``" {
                     // Three backticks open a fenced code block.
                     return Some(Binding::Custom(Message::ConvertBlock {
                         index,
@@ -1737,9 +1724,7 @@ impl AppModel {
         match kind {
             BlockKind::Quote(_) => Some(BlockKind::Quote(level)),
             BlockKind::Bullet(_) => Some(BlockKind::Bullet(level)),
-            BlockKind::Numbered(_, number) => {
-                Some(BlockKind::Numbered(level, *number))
-            }
+            BlockKind::Numbered(_, number) => Some(BlockKind::Numbered(level, *number)),
             BlockKind::Todo(_, done) => Some(BlockKind::Todo(level, *done)),
             BlockKind::Paragraph
             | BlockKind::Heading(_)
@@ -1762,12 +1747,11 @@ impl AppModel {
             BlockKind::Quote(_)
             | BlockKind::Bullet(_)
             | BlockKind::Numbered(..)
-            | BlockKind::Todo(..) if level > 0 => {
+            | BlockKind::Todo(..)
+                if level > 0 =>
+            {
                 // Nested item: backspace un-nests it.
-                Some(Binding::Custom(Message::ChangeLevel {
-                    index,
-                    delta: -1,
-                }))
+                Some(Binding::Custom(Message::ChangeLevel { index, delta: -1 }))
             }
             BlockKind::Quote(_)
             | BlockKind::Bullet(_)
@@ -1792,10 +1776,7 @@ impl AppModel {
     /// The binding for the Enter key in a single-line block: the text after
     /// the caret moves into a new block below, which continues list items and
     /// quotes of the same kind. Entering an empty list item exits the list.
-    fn enter_binding(
-        index: usize,
-        block: &EditableBlock,
-    ) -> text_editor::Binding<Message> {
+    fn enter_binding(index: usize, block: &EditableBlock) -> text_editor::Binding<Message> {
         use cosmic::widget::text_editor::Binding;
         let cursor = block.content.cursor();
         let text = block.content.text();
@@ -1807,9 +1788,7 @@ impl AppModel {
         let (before, after) = split_at(&text, cursor.position.column);
         let continuation = match &block.kind {
             BlockKind::Bullet(level) => Some(BlockKind::Bullet(*level)),
-            BlockKind::Numbered(level, number) => {
-                Some(BlockKind::Numbered(*level, *number))
-            }
+            BlockKind::Numbered(level, number) => Some(BlockKind::Numbered(*level, *number)),
             BlockKind::Todo(level, done) => Some(BlockKind::Todo(*level, *done)),
             BlockKind::Quote(level) => Some(BlockKind::Quote(*level)),
             BlockKind::Paragraph
@@ -1854,16 +1833,14 @@ impl AppModel {
 
     /// The nearest editable block before `index`, skipping dividers.
     fn previous_editable(blocks: &[EditableBlock], index: usize) -> Option<usize> {
-        (0..index).rev().find(|&i| {
-            !matches!(blocks[i].kind, BlockKind::Divider)
-        })
+        (0..index)
+            .rev()
+            .find(|&i| !matches!(blocks[i].kind, BlockKind::Divider))
     }
 
     /// The nearest editable block after `index`, skipping dividers.
     fn next_editable(blocks: &[EditableBlock], index: usize) -> Option<usize> {
-        (index + 1..blocks.len()).find(|&i| {
-            !matches!(blocks[i].kind, BlockKind::Divider)
-        })
+        (index + 1..blocks.len()).find(|&i| !matches!(blocks[i].kind, BlockKind::Divider))
     }
 
     /// A task that focuses the block editor with the given index.
@@ -1879,11 +1856,7 @@ impl AppModel {
     /// drop it), and returns a task that moves focus back into the document:
     /// the converted block, or the next editable block after a divider
     /// (inserting an empty paragraph when there is nowhere to type).
-    fn format_block(
-        &mut self,
-        index: usize,
-        kind: BlockKind,
-    ) -> Task<cosmic::Action<Message>> {
+    fn format_block(&mut self, index: usize, kind: BlockKind) -> Task<cosmic::Action<Message>> {
         let Some(block) = self.blocks.get_mut(index) else {
             return Task::none();
         };
@@ -2106,25 +2079,16 @@ fn split_at(text: &str, column: usize) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{split_at, AppModel};
+    use super::{AppModel, split_at};
     use crate::editor::BlockKind;
 
     #[test]
     fn split_at_clamps_to_char_boundaries() {
-        assert_eq!(
-            split_at("hello", 3),
-            ("hel".to_owned(), "lo".to_owned())
-        );
+        assert_eq!(split_at("hello", 3), ("hel".to_owned(), "lo".to_owned()));
         // The column is a byte offset: splitting inside a multi-byte char
         // clamps down to the start of the char.
-        assert_eq!(
-            split_at("héllo", 1),
-            ("h".to_owned(), "éllo".to_owned())
-        );
-        assert_eq!(
-            split_at("héllo", 3),
-            ("hé".to_owned(), "llo".to_owned())
-        );
+        assert_eq!(split_at("héllo", 1), ("h".to_owned(), "éllo".to_owned()));
+        assert_eq!(split_at("héllo", 3), ("hé".to_owned(), "llo".to_owned()));
         assert_eq!(split_at("hello", 99), ("hello".to_owned(), String::new()));
         assert_eq!(split_at("", 0), (String::new(), String::new()));
     }

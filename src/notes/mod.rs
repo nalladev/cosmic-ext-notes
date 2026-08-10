@@ -926,7 +926,11 @@ mod tests {
             .expect("set preview")
             .expect("note");
         assert!(!off.preview());
-        assert!(fs::read_to_string(&path).expect("read").contains("preview: false"));
+        assert!(
+            fs::read_to_string(&path)
+                .expect("read")
+                .contains("preview: false")
+        );
     }
 
     #[test]

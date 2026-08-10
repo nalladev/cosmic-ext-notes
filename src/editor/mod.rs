@@ -55,10 +55,7 @@ impl BlockKind {
             | Self::Bullet(level)
             | Self::Numbered(level, _)
             | Self::Todo(level, _) => *level,
-            Self::Paragraph
-            | Self::Heading(_)
-            | Self::Code(_)
-            | Self::Divider => 0,
+            Self::Paragraph | Self::Heading(_) | Self::Code(_) | Self::Divider => 0,
         }
     }
 }
@@ -501,7 +498,9 @@ pub(crate) fn prefix_kind(text: &str) -> Option<BlockKind> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_divider, parse_markdown, prefix_kind, serialize_markdown, wrap_inline, Block, BlockKind};
+    use super::{
+        Block, BlockKind, is_divider, parse_markdown, prefix_kind, serialize_markdown, wrap_inline,
+    };
 
     /// Asserts that parsing and re-serializing is the identity for text that
     /// is already in canonical markdown form.
@@ -532,20 +531,17 @@ mod tests {
 
     #[test]
     fn headings_parse_with_level() {
-        assert_eq!(
-            parse_markdown("# One"),
-            vec![Block::heading(1, "One")]
-        );
-        assert_eq!(
-            parse_markdown("###### Six"),
-            vec![Block::heading(6, "Six")]
-        );
+        assert_eq!(parse_markdown("# One"), vec![Block::heading(1, "One")]);
+        assert_eq!(parse_markdown("###### Six"), vec![Block::heading(6, "Six")]);
         assert_round_trip("# One\n\n###### Six\n");
     }
 
     #[test]
     fn heading_lookalikes_stay_paragraphs() {
-        assert_eq!(parse_markdown("####### Seven"), vec![paragraph("####### Seven")]);
+        assert_eq!(
+            parse_markdown("####### Seven"),
+            vec![paragraph("####### Seven")]
+        );
         assert_eq!(parse_markdown("#NoSpace"), vec![paragraph("#NoSpace")]);
         assert_eq!(parse_markdown("a#b"), vec![paragraph("a#b")]);
     }
@@ -574,10 +570,7 @@ mod tests {
 
     #[test]
     fn nested_lists_preserve_level() {
-        assert_eq!(
-            parse_markdown("  - child"),
-            vec![Block::bullet(1, "child")]
-        );
+        assert_eq!(parse_markdown("  - child"), vec![Block::bullet(1, "child")]);
         assert_eq!(
             parse_markdown("    - grand"),
             vec![Block::bullet(2, "grand")]
@@ -591,18 +584,9 @@ mod tests {
 
     #[test]
     fn numbered_lists_preserve_number() {
-        assert_eq!(
-            parse_markdown("1. a"),
-            vec![Block::numbered(0, 1, "a")]
-        );
-        assert_eq!(
-            parse_markdown("3. c"),
-            vec![Block::numbered(0, 3, "c")]
-        );
-        assert_eq!(
-            parse_markdown("0. z"),
-            vec![Block::numbered(0, 0, "z")]
-        );
+        assert_eq!(parse_markdown("1. a"), vec![Block::numbered(0, 1, "a")]);
+        assert_eq!(parse_markdown("3. c"), vec![Block::numbered(0, 3, "c")]);
+        assert_eq!(parse_markdown("0. z"), vec![Block::numbered(0, 0, "z")]);
         assert_round_trip("3. c\n");
     }
 
@@ -615,35 +599,17 @@ mod tests {
 
     #[test]
     fn nested_numbered_lists_preserve_level() {
-        assert_eq!(
-            parse_markdown("  2. b"),
-            vec![Block::numbered(1, 2, "b")]
-        );
+        assert_eq!(parse_markdown("  2. b"), vec![Block::numbered(1, 2, "b")]);
         assert_round_trip("  2. b\n");
     }
 
     #[test]
     fn todos_parse_checked_state() {
-        assert_eq!(
-            parse_markdown("- [ ] a"),
-            vec![Block::todo(0, false, "a")]
-        );
-        assert_eq!(
-            parse_markdown("- [x] b"),
-            vec![Block::todo(0, true, "b")]
-        );
-        assert_eq!(
-            parse_markdown("- [X] c"),
-            vec![Block::todo(0, true, "c")]
-        );
-        assert_eq!(
-            parse_markdown("[ ] e"),
-            vec![Block::todo(0, false, "e")]
-        );
-        assert_eq!(
-            parse_markdown("[x] f"),
-            vec![Block::todo(0, true, "f")]
-        );
+        assert_eq!(parse_markdown("- [ ] a"), vec![Block::todo(0, false, "a")]);
+        assert_eq!(parse_markdown("- [x] b"), vec![Block::todo(0, true, "b")]);
+        assert_eq!(parse_markdown("- [X] c"), vec![Block::todo(0, true, "c")]);
+        assert_eq!(parse_markdown("[ ] e"), vec![Block::todo(0, false, "e")]);
+        assert_eq!(parse_markdown("[x] f"), vec![Block::todo(0, true, "f")]);
     }
 
     #[test]
@@ -660,10 +626,7 @@ mod tests {
             parse_markdown("> > nested"),
             vec![Block::quote(1, "nested")]
         );
-        assert_eq!(
-            parse_markdown(">> tight"),
-            vec![Block::quote(1, "tight")]
-        );
+        assert_eq!(parse_markdown(">> tight"), vec![Block::quote(1, "tight")]);
         assert_eq!(parse_markdown(">"), vec![Block::quote(0, "")]);
     }
 
@@ -719,10 +682,7 @@ mod tests {
 
     #[test]
     fn unterminated_fence_consumes_the_rest() {
-        assert_eq!(
-            parse_markdown("```\na\nb"),
-            vec![Block::code("", "a\nb")]
-        );
+        assert_eq!(parse_markdown("```\na\nb"), vec![Block::code("", "a\nb")]);
     }
 
     #[test]
