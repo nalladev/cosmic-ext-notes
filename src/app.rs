@@ -1687,6 +1687,24 @@ impl AppModel {
                     Binding::from_key_press(key_press)
                 }
             }
+            _ if key_press.modifiers.control() && !key_press.modifiers.shift() => {
+                // Inline formatting shortcuts, matching common editors.
+                match key_press.modified_key.as_ref() {
+                    Key::Character("b") => Some(Binding::Custom(Message::WrapInline {
+                        index,
+                        marker: InlineMarker::Bold,
+                    })),
+                    Key::Character("i") => Some(Binding::Custom(Message::WrapInline {
+                        index,
+                        marker: InlineMarker::Italic,
+                    })),
+                    Key::Character("k") => Some(Binding::Custom(Message::WrapInline {
+                        index,
+                        marker: InlineMarker::Code,
+                    })),
+                    _ => Binding::from_key_press(key_press),
+                }
+            }
             _ => {
                 if key_press.text.as_deref() == Some(" ") {
                     // A space may complete a typed markdown prefix.
