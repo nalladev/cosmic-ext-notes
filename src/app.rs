@@ -251,8 +251,6 @@ pub enum Message {
     AutosaveTick,
     /// Save the active note now.
     SaveNow,
-    /// A message that does nothing.
-    Ignored,
 }
 
 /// Inline markdown formatting applied to a block's selection by the toolbar.
@@ -805,19 +803,32 @@ impl cosmic::Application for AppModel {
             self.core()
                 .watch_config::<Config>(Self::APP_ID)
                 .map(|update| Message::UpdateConfig(update.config)),
-            // Keyboard shortcuts not handled by the window's keyboard navigation.
-            event::listen().map(|event| match event {
-                event::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+            // Keyboard shortcuts not handled by the window's keyboard
+            // navigation. Events that do not map to a shortcut return `None`
+            // so no message is produced: the runtime synthesizes a
+            // `RequestResize` platform event on every update pass, and turning
+            // each one into a message would keep the app redrawing in an
+            // endless loop. Only `Status::Ignored` events are considered, the
+            // same filter `event::listen()` applied.
+            event::listen_with(|event, status, _window| match event {
+                event::Event::Keyboard(keyboard::Event::KeyPressed {
+                    key,
+                    modifiers,
+                    ..
+                }) => {
+                    if status != event::Status::Ignored {
+                        return None;
+                    }
                     let primary = modifiers.logo() || modifiers.control();
                     if primary && key == keyboard::Key::Character("n".into()) {
-                        Message::KeyboardShortcut(Shortcut::NewNote)
+                        Some(Message::KeyboardShortcut(Shortcut::NewNote))
                     } else if primary && key == keyboard::Key::Character("s".into()) {
-                        Message::KeyboardShortcut(Shortcut::Save)
+                        Some(Message::KeyboardShortcut(Shortcut::Save))
                     } else {
-                        Message::Ignored
+                        None
                     }
                 }
-                _ => Message::Ignored,
+                _ => None,
             }),
         ];
 
@@ -841,8 +852,6 @@ impl cosmic::Application for AppModel {
     #[allow(clippy::too_many_lines)]
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
         match message {
-            Message::Ignored => Task::none(),
-
             Message::Surface(action) => {
                 cosmic::task::message(cosmic::Action::Cosmic(cosmic::app::Action::Surface(action)))
             }
