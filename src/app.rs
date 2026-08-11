@@ -2049,6 +2049,13 @@ impl AppModel {
             .into()
     }
 
+    /// The note content column is at most this wide so that lines don't
+    /// stretch across wide windows; it shrinks when the window is narrower.
+    const EDITOR_MAX_WIDTH: f32 = 718.0;
+
+    /// Space between the tab bar and the note content.
+    const EDITOR_TOP_PADDING: f32 = 76.0;
+
     /// The editor for the active tab: the tab bar, title input, toolbar, and
     /// block editor. Shows the empty state when there are no tabs or when the
     /// active tab is a fresh "+" tab with no note yet.
@@ -2061,7 +2068,7 @@ impl AppModel {
         if tab.path.is_none() {
             return widget::column::with_capacity(2)
                 .push(Self::tab_bar(&self.tab_model))
-                .push(Self::editor_empty_state())
+                .push(Self::centered_tab_content(Self::editor_empty_state()))
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into();
@@ -2073,16 +2080,40 @@ impl AppModel {
             .on_submit(|_| Message::RenameSubmit)
             .width(Length::Fill);
 
-        let mut column = widget::column::with_capacity(5)
-            .push(Self::tab_bar(&self.tab_model))
+        let mut content = widget::column::with_capacity(4)
             .push(widget::container(title_input).padding([spacing.space_s, spacing.space_s]))
             .push(divider::horizontal::default())
             .push(self.block_toolbar())
             .push(self.block_editor());
         if let Some(panel) = self.backlinks_panel() {
-            column = column.push(divider::horizontal::default()).push(panel);
+            content = content.push(divider::horizontal::default()).push(panel);
         }
-        column.width(Length::Fill).height(Length::Fill).into()
+        let content = content.width(Length::Fill).height(Length::Fill);
+        widget::column::with_capacity(2)
+            .push(Self::tab_bar(&self.tab_model))
+            .push(Self::centered_tab_content(content))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+
+    /// Wraps a tab's content so it is at most [`Self::EDITOR_MAX_WIDTH`] wide
+    /// and centered below the tab bar, with [`Self::EDITOR_TOP_PADDING`] of
+    /// space above it. The inner column's cross alignment centers the content
+    /// container, so it stays centered when the window grows.
+    fn centered_tab_content<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+        widget::column::with_capacity(1)
+            .push(
+                widget::container(content)
+                    .width(Length::Fill)
+                    .max_width(Self::EDITOR_MAX_WIDTH)
+                    .height(Length::Fill)
+                    .padding([Self::EDITOR_TOP_PADDING, 0.0, 0.0, 0.0]),
+            )
+            .align_x(Horizontal::Center)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 
     /// A panel listing the notes that link to the active note, if any.
