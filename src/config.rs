@@ -4,14 +4,18 @@ use cosmic::cosmic_config::{self, CosmicConfigEntry, cosmic_config_derive::Cosmi
 
 /// Persistent application settings.
 #[derive(Debug, Default, Clone, CosmicConfigEntry, Eq, PartialEq)]
-#[version = 2]
+#[version = 3]
 pub struct Config {
     /// Directory where notes are stored as markdown files.
     ///
     /// When `None`, the default of `~/Documents/cosmic-notes` is used.
     vault_path: Option<String>,
-    /// The note that was open when the app last closed, as a path relative to
-    /// the vault root. Restored as a tab on the next launch.
+    /// The tabs that were open when the app last closed, as paths relative
+    /// to the vault root, in left-to-right tab order. Blank "Home" tabs are
+    /// not stored; an empty list means no notes were open.
+    open_tabs: Vec<String>,
+    /// The tab that was active when the app last closed, as a path relative
+    /// to the vault root. Restored as the active tab on the next launch.
     last_note: Option<String>,
 }
 
@@ -22,7 +26,14 @@ impl Config {
         self.vault_path.as_deref()
     }
 
-    /// Returns the path (relative to the vault root) of the last opened note,
+    /// Returns the paths (relative to the vault root) of the tabs that were
+    /// open when the app last closed, in left-to-right tab order.
+    #[must_use]
+    pub fn open_tabs(&self) -> &[String] {
+        &self.open_tabs
+    }
+
+    /// Returns the path (relative to the vault root) of the last active tab,
     /// if any.
     #[must_use]
     pub fn last_note(&self) -> Option<&str> {

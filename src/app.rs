@@ -713,21 +713,54 @@ impl cosmic::Application for AppModel {
         };
         app.rebuild_nav_model();
 
-        // Restore the note that was open when the app last closed as a tab.
-        if let Some(relative) = app.config.last_note() {
+        // Restore the tabs that were open when the app last closed, and the
+        // tab that was active. Older configs only remember a single note;
+        // those restore as a single tab.
+        let mut restore_paths: Vec<String> = app.config.open_tabs().to_vec();
+        if restore_paths.is_empty() && let Some(relative) = app.config.last_note() {
+            restore_paths.push(relative.to_owned());
+        }
+        for relative in &restore_paths {
             let path = app.vault.root().join(relative);
-            let note = app
+            let Some(note) = app
                 .vault
                 .notes()
                 .iter()
-                .find(|note| note.path() == path && !note.in_trash());
-            if let Some(note) = note {
-                let body = note.body().to_owned();
-                let title = note.title().to_owned();
-                app.new_tab(path, &body, &title);
-                app.rebuild_nav_model();
+                .find(|note| note.path() == path && !note.in_trash())
+            else {
+                continue;
+            };
+            let body = note.body().to_owned();
+            let title = note.title().to_owned();
+            app.tab_model
+                .insert()
+                .text(title.clone())
+                .data::<Tab>(Tab::new(path, &body, &title))
+                .closable()
+                .activate();
+        }
+        // The last closed state had no notes open: restore a single Home tab.
+        if app.tab_model.len() == 0 {
+            app.tab_model
+                .insert()
+                .text(fl!("home"))
+                .data::<Tab>(Tab::blank())
+                .closable()
+                .activate();
+        } else if let Some(relative) = app.config.last_note() {
+            // Re-activate the tab that was active when the app closed.
+            let path = app.vault.root().join(relative);
+            let active_entity = app.tab_model.iter().find(|entity| {
+                app.tab_model
+                    .data::<Tab>(*entity)
+                    .is_some_and(|tab| tab.path.as_deref() == Some(path.as_path()))
+            });
+            if let Some(entity) = active_entity {
+                app.tab_model.activate(entity);
             }
         }
+        app.refresh_tab_closability();
+        app.rebuild_nav_model();
 
         // Create a startup command that sets the window title.
         let command = app.update_title();
@@ -779,7 +812,7 @@ impl cosmic::Application for AppModel {
                 Message::ToggleContextPage(ContextPage::About),
             ),
             ContextPage::Settings => context_drawer::context_drawer(
-                self.settings(),
+                Self::settings(),
                 Message::ToggleContextPage(ContextPage::Settings),
             )
             .title(fl!("settings")),
@@ -907,10 +940,7 @@ impl cosmic::Application for AppModel {
                 self.commit_title_rename();
                 let save = self.save_active(false);
                 self.tab_model.activate(entity);
-                let path = self.active_tab().and_then(|tab| tab.path.clone());
-                if let Some(path) = &path {
-                    self.remember_last_tab(path);
-                }
+                self.persist_tabs();
                 self.rebuild_nav_model();
                 Task::batch([save, self.update_title()])
             }
@@ -1419,14 +1449,14 @@ impl AppModel {
     }
 
     /// Inserts a new tab for the note at `path` and makes it active.
-    fn new_tab(&mut self, path: PathBuf, body: &str, title: &str) {
+    fn new_tab(&mut self, path: &Path, body: &str, title: &str) {
         self.tab_model
             .insert()
             .text(title.to_owned())
-            .data::<Tab>(Tab::new(path.clone(), body, title))
+            .data::<Tab>(Tab::new(path.to_path_buf(), body, title))
             .closable()
             .activate();
-        self.remember_last_tab(&path);
+        self.persist_tabs();
         self.refresh_tab_closability();
     }
 
@@ -1470,7 +1500,7 @@ impl AppModel {
                 }
                 let entity = self.tab_model.active();
                 self.tab_model.text_set(entity, title);
-                self.remember_last_tab(path);
+                self.persist_tabs();
                 self.refresh_tab_closability();
                 self.rebuild_nav_model();
                 return Task::batch([
@@ -1485,7 +1515,7 @@ impl AppModel {
         };
         let body = note.body().to_owned();
         let title = note.title().to_owned();
-        self.new_tab(path.to_path_buf(), &body, &title);
+        self.new_tab(path, &body, &title);
         self.rebuild_nav_model();
         Task::batch([
             save,
@@ -1518,7 +1548,6 @@ impl AppModel {
                 *tab = Tab::blank();
             }
             self.tab_model.text_set(entity, fl!("home"));
-            self.remember_no_tabs();
         } else {
             if self.tab_model.is_active(entity)
                 && let Some(position) = self.tab_model.position(entity)
@@ -1530,11 +1559,8 @@ impl AppModel {
                 }
             }
             self.tab_model.remove(entity);
-            match self.active_tab().and_then(|tab| tab.path.clone()) {
-                Some(path) => self.remember_last_tab(&path),
-                None => self.remember_no_tabs(),
-            }
         }
+        self.persist_tabs();
         self.refresh_tab_closability();
         self.rebuild_nav_model();
     }
@@ -1553,29 +1579,38 @@ impl AppModel {
         }
     }
 
-    /// Persists `path` (relative to the vault root) as the note to restore on
-    /// the next launch.
-    fn remember_last_tab(&mut self, path: &Path) {
+    /// Persists the open tabs, in order, plus the active one to config so the
+    /// next launch restores the same set of tabs. Blank "Home" tabs have no
+    /// path and are not stored; an empty list means no notes were open.
+    fn persist_tabs(&mut self) {
         let Some(handler) = self.config_handler.as_ref() else {
             return;
         };
-        let relative = path
-            .strip_prefix(self.vault.root())
-            .map(|relative| relative.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| path.to_string_lossy().into_owned());
-        let _ = self.config.set_last_note(handler, Some(relative));
-    }
-
-    /// Clears the persisted "last tab" when the last tab closes.
-    fn remember_no_tabs(&mut self) {
-        if let Some(handler) = &self.config_handler {
-            let _ = self.config.set_last_note(handler, None);
-        }
+        let relative = |path: &Path| {
+            path.strip_prefix(self.vault.root())
+                .map_or_else(
+                    |_| path.to_string_lossy().into_owned(),
+                    |relative| relative.to_string_lossy().into_owned(),
+                )
+        };
+        let open_tabs = self
+            .tab_model
+            .iter()
+            .filter_map(|entity| self.tab_model.data::<Tab>(entity))
+            .filter_map(|tab| tab.path.as_ref())
+            .map(|path| relative(path.as_path()))
+            .collect();
+        let active = self
+            .active_tab()
+            .and_then(|tab| tab.path.as_ref())
+            .map(|path| relative(path.as_path()));
+        let _ = self.config.set_open_tabs(handler, open_tabs);
+        let _ = self.config.set_last_note(handler, active);
     }
 
     /// The settings panel: an empty column for now, matching the layout
     /// cosmic-store gives its (also empty) settings page.
-    fn settings(&self) -> Element<'_, Message> {
+    fn settings() -> Element<'static, Message> {
         widget::settings::view_column(vec![]).into()
     }
 
@@ -1587,7 +1622,7 @@ impl AppModel {
                 let path = note.path().to_path_buf();
                 let body = note.body().to_owned();
                 let title = note.title().to_owned();
-                self.new_tab(path, &body, &title);
+                self.new_tab(&path, &body, &title);
                 self.rebuild_nav_model();
                 let focus =
                     text_input::focus(cosmic::widget::Id::new(TITLE_ID)).map(cosmic::action::app);
@@ -1619,7 +1654,7 @@ impl AppModel {
                 let body = note.body().to_owned();
                 let title = note.title().to_owned();
                 self.expanded.insert(parent);
-                self.new_tab(path, &body, &title);
+                self.new_tab(&path, &body, &title);
                 self.rebuild_nav_model();
                 let focus =
                     text_input::focus(cosmic::widget::Id::new(TITLE_ID)).map(cosmic::action::app);
@@ -1727,7 +1762,7 @@ impl AppModel {
                 let new_title = updated.title().to_owned();
                 if let Some(tab) = self.tab_model.active_data_mut::<Tab>() {
                     tab.path = Some(new_path);
-                    tab.title_draft = new_title.clone();
+                    new_title.clone_into(&mut tab.title_draft);
                 }
                 // Keep the tab button label in sync with the new title.
                 self.tab_model.text_set(entity, new_title);
