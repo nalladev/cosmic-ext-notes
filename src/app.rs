@@ -1461,9 +1461,8 @@ impl AppModel {
     }
 
     /// Opens the note at `path` in a tab: activating the existing tab for it
-    /// when one is open, loading it into the active blank tab when there is
-    /// one, or creating a new tab (`force_new` always inserts a fresh tab, for
-    /// "open in new tab").
+    /// when one is open, loading it into the active tab otherwise (`force_new`
+    /// always inserts a fresh tab, for "open in new tab").
     fn open_tab(&mut self, path: &Path, force_new: bool) -> Task<cosmic::Action<Message>> {
         self.commit_title_rename();
         let save = self.save_active(false);
@@ -1486,29 +1485,29 @@ impl AppModel {
                 self.rebuild_nav_model();
                 return Task::batch([save, self.update_title()]);
             }
-            // A fresh "+" tab has no note yet; picking a note from the sidebar
-            // loads it into that tab instead of stacking another empty one.
-            if self.active_tab().is_some_and(|tab| tab.path.is_none()) {
-                let Some(note) = self.vault.notes().iter().find(|note| note.path() == path) else {
-                    return Task::batch([save, self.update_title()]);
-                };
-                let body = note.body().to_owned();
-                let title = note.title().to_owned();
-                if let Some(tab) = self.active_tab_mut() {
-                    tab.path = Some(path.to_path_buf());
-                    tab.load_body(&body, &title);
-                }
-                let entity = self.tab_model.active();
-                self.tab_model.text_set(entity, title);
-                self.persist_tabs();
-                self.refresh_tab_closability();
-                self.rebuild_nav_model();
-                return Task::batch([
-                    save,
-                    Self::focus_block(0).map(cosmic::action::app),
-                    self.update_title(),
-                ]);
+            // Picking a note from the sidebar (or a backlink) loads it into
+            // the active tab — whether that tab is a fresh "+" Home tab or
+            // already shows another note — instead of stacking a new tab. The
+            // previous note was saved above, so its tab is reused in place.
+            let Some(note) = self.vault.notes().iter().find(|note| note.path() == path) else {
+                return Task::batch([save, self.update_title()]);
+            };
+            let body = note.body().to_owned();
+            let title = note.title().to_owned();
+            if let Some(tab) = self.active_tab_mut() {
+                tab.path = Some(path.to_path_buf());
+                tab.load_body(&body, &title);
             }
+            let entity = self.tab_model.active();
+            self.tab_model.text_set(entity, title);
+            self.persist_tabs();
+            self.refresh_tab_closability();
+            self.rebuild_nav_model();
+            return Task::batch([
+                save,
+                Self::focus_block(0).map(cosmic::action::app),
+                self.update_title(),
+            ]);
         }
         let Some(note) = self.vault.notes().iter().find(|note| note.path() == path) else {
             return Task::batch([save, self.update_title()]);
