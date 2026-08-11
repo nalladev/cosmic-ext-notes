@@ -20,6 +20,7 @@ preview = Preview
 note-title-placeholder = Note title
 note-placeholder = Start writing…
 untitled = Untitled
+home = Home
 empty-trash = Empty Trash
 today = Today
 yesterday = Yesterday

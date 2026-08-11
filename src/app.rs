@@ -922,15 +922,17 @@ impl cosmic::Application for AppModel {
 
             Message::TabNew => {
                 // The "+" button opens a fresh, blank tab showing the empty
-                // state; the note is created (or picked) afterwards.
+                // state; the note is created (or picked) afterwards. A tab
+                // with no note open is labeled "Home".
                 self.sidebar_context_menu_point = None;
                 let save = self.save_active(false);
                 self.tab_model
                     .insert()
-                    .text(fl!("untitled"))
+                    .text(fl!("home"))
                     .data::<Tab>(Tab::blank())
                     .closable()
                     .activate();
+                self.refresh_tab_closability();
                 self.rebuild_nav_model();
                 Task::batch([save, self.update_title()])
             }
@@ -1425,6 +1427,7 @@ impl AppModel {
             .closable()
             .activate();
         self.remember_last_tab(&path);
+        self.refresh_tab_closability();
     }
 
     /// Opens the note at `path` in a tab: activating the existing tab for it
@@ -1468,6 +1471,7 @@ impl AppModel {
                 let entity = self.tab_model.active();
                 self.tab_model.text_set(entity, title);
                 self.remember_last_tab(path);
+                self.refresh_tab_closability();
                 self.rebuild_nav_model();
                 return Task::batch([
                     save,
@@ -1500,25 +1504,53 @@ impl AppModel {
 
     /// Closes the tab with the given entity, saving its changes. When the
     /// active tab is closed, the nearest neighbor (to the left, or the right
-    /// for the first tab) becomes active, like cosmic-edit.
+    /// for the first tab) becomes active, like cosmic-edit. The last tab is
+    /// never removed: closing it resets it to the blank "Home" tab, so there
+    /// is always at least one tab left open.
     fn close_tab(&mut self, entity: segmented_button::Entity) {
         self.commit_title_rename();
         let _ = self.save_active(false);
-        if self.tab_model.is_active(entity)
-            && let Some(position) = self.tab_model.position(entity)
-        {
-            if position > 0 {
-                self.tab_model.activate_position(position - 1);
-            } else {
-                self.tab_model.activate_position(position + 1);
+
+        // Keep at least one tab open: closing the only tab (note or Home)
+        // replaces it with the blank Home tab instead of removing it.
+        if self.tab_model.len() <= 1 {
+            if let Some(tab) = self.tab_model.data_mut::<Tab>(entity) {
+                *tab = Tab::blank();
+            }
+            self.tab_model.text_set(entity, fl!("home"));
+            self.remember_no_tabs();
+        } else {
+            if self.tab_model.is_active(entity)
+                && let Some(position) = self.tab_model.position(entity)
+            {
+                if position > 0 {
+                    self.tab_model.activate_position(position - 1);
+                } else {
+                    self.tab_model.activate_position(position + 1);
+                }
+            }
+            self.tab_model.remove(entity);
+            match self.active_tab().and_then(|tab| tab.path.clone()) {
+                Some(path) => self.remember_last_tab(&path),
+                None => self.remember_no_tabs(),
             }
         }
-        self.tab_model.remove(entity);
-        match self.active_tab().and_then(|tab| tab.path.clone()) {
-            Some(path) => self.remember_last_tab(&path),
-            None => self.remember_no_tabs(),
-        }
+        self.refresh_tab_closability();
         self.rebuild_nav_model();
+    }
+
+    /// Shows a close button on every tab except the last remaining one when
+    /// it has no note open (the Home tab): that one cannot be closed.
+    fn refresh_tab_closability(&mut self) {
+        let entities: Vec<_> = self.tab_model.iter().collect();
+        let is_only_tab = entities.len() == 1;
+        for entity in entities {
+            let is_home = self
+                .tab_model
+                .data::<Tab>(entity)
+                .is_some_and(|tab| tab.path.is_none());
+            self.tab_model.closable_set(entity, !(is_only_tab && is_home));
+        }
     }
 
     /// Persists `path` (relative to the vault root) as the note to restore on
