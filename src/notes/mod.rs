@@ -10,6 +10,8 @@
 //! This module is intentionally free of any UI or COSMIC dependencies so that it
 //! can be unit-tested in isolation.
 
+use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -39,6 +41,7 @@ pub struct Note {
     body: String,
 }
 
+#[allow(dead_code)] // Kept for persistence and future note-list views.
 impl Note {
     /// Absolute path of the backing file.
     #[must_use]
@@ -168,12 +171,16 @@ pub struct Vault {
     /// The root directory that holds the notes.
     root: PathBuf,
     /// The trash directory inside the vault.
+    #[allow(dead_code)] // Kept for the retained trash-management API.
     trash: PathBuf,
     /// All notes (including trashed ones), sorted: pinned first, then by
     /// modification time descending, then by title.
     notes: Vec<Note>,
+    /// The directory structure of the vault, rebuilt whenever notes change.
+    tree: Tree,
 }
 
+#[allow(dead_code)] // The simplified UI does not currently expose every vault operation.
 impl Vault {
     /// Opens (creating if necessary) the vault at the given directory and
     /// scans it for notes.
@@ -197,8 +204,14 @@ impl Vault {
                 .then_with(|| b.modified.cmp(&a.modified))
                 .then_with(|| a.title.cmp(&b.title))
         });
+        let tree = build_tree(&root)?;
 
-        Ok(Self { root, trash, notes })
+        Ok(Self {
+            root,
+            trash,
+            notes,
+            tree,
+        })
     }
 
     /// All notes, including trashed ones.
@@ -207,8 +220,15 @@ impl Vault {
         &self.notes
     }
 
-    /// Creates a new note with the given title. The title is sanitized and made
-    /// unique (e.g. `Untitled 2.md` if `Untitled.md` already exists).
+    /// The root directory that holds the notes.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Creates a new note with the given title at the vault root. The title is
+    /// sanitized and made unique (e.g. `Untitled 2.md` if `Untitled.md` already
+    /// exists).
     ///
     /// Returns `None` if the title is not usable.
     ///
@@ -216,10 +236,24 @@ impl Vault {
     ///
     /// Returns an error if the note file cannot be written.
     pub fn create(&mut self, title: &str) -> io::Result<Option<Note>> {
+        let root = self.root.clone();
+        self.create_in(&root, title)
+    }
+
+    /// Creates a new note with the given title inside `parent`. The title is
+    /// sanitized and made unique (e.g. `Untitled 2.md` if `Untitled.md` already
+    /// exists in the folder).
+    ///
+    /// Returns `None` if the title is not usable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the note file cannot be written.
+    pub fn create_in(&mut self, parent: &Path, title: &str) -> io::Result<Option<Note>> {
         let Some(stem) = sanitize_title(title) else {
             return Ok(None);
         };
-        let path = unique_path(&self.root, &stem);
+        let path = unique_path(parent, &stem);
         let mut frontmatter = Frontmatter::new();
         frontmatter.set_pinned(false);
         frontmatter.set_created(now_rfc3339());
@@ -228,6 +262,7 @@ impl Vault {
         let note = Note::from_text(path, text);
         self.notes.push(note.clone());
         self.sort_notes();
+        self.rebuild_tree();
         Ok(Some(note))
     }
 
@@ -254,6 +289,7 @@ impl Vault {
             let conflict = conflict_path(&note.path);
             write_atomic(&conflict, &new_text)?;
             note.reload_from(&disk_text);
+            self.rebuild_tree();
             return Ok(Some(SaveOutcome::ConflictCopy { path: conflict }));
         }
 
@@ -293,6 +329,7 @@ impl Vault {
             .unwrap_or_default();
         let updated = note.clone();
         self.sort_notes();
+        self.rebuild_tree();
         Ok(Some(updated))
     }
 
@@ -368,6 +405,7 @@ impl Vault {
         note.path = new_path;
         let updated = note.clone();
         self.sort_notes();
+        self.rebuild_tree();
         Ok(Some(updated))
     }
 
@@ -390,6 +428,7 @@ impl Vault {
         note.path = new_path;
         let updated = note.clone();
         self.sort_notes();
+        self.rebuild_tree();
         Ok(Some(updated))
     }
 
@@ -406,7 +445,76 @@ impl Vault {
         let path = self.notes[index].path.clone();
         fs::remove_file(&path)?;
         self.notes.remove(index);
+        self.rebuild_tree();
         Ok(true)
+    }
+
+    /// Creates a new folder with the given name inside `parent`. The name is
+    /// sanitized and made unique (e.g. `Ideas 2` if `Ideas` already exists).
+    ///
+    /// Returns `None` if the name is not usable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be created.
+    pub fn create_folder(&mut self, parent: &Path, name: &str) -> io::Result<Option<PathBuf>> {
+        let Some(stem) = sanitize_title(name) else {
+            return Ok(None);
+        };
+        let path = unique_dir_path(parent, &stem);
+        fs::create_dir(&path)?;
+        self.rebuild_tree();
+        Ok(Some(path))
+    }
+
+    /// Renames the folder at `path` to `new_name`, moving it to a sanitized,
+    /// unique name in the same parent. The paths of every note inside the
+    /// folder are updated in place.
+    ///
+    /// Returns the new path, or `None` if the new name is not usable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be moved.
+    pub fn rename_folder(&mut self, path: &Path, new_name: &str) -> io::Result<Option<PathBuf>> {
+        let Some(stem) = sanitize_title(new_name) else {
+            return Ok(None);
+        };
+        let Some(parent) = path.parent() else {
+            return Ok(None);
+        };
+        let new_path = unique_dir_path(parent, &stem);
+        if new_path == path {
+            return Ok(Some(new_path));
+        }
+        fs::rename(path, &new_path)?;
+        // The notes inside the folder move with it.
+        for note in &mut self.notes {
+            if note.path.starts_with(path) {
+                note.path = new_path.join(
+                    note.path
+                        .strip_prefix(path)
+                        .expect("path was checked with starts_with"),
+                );
+            }
+        }
+        self.rebuild_tree();
+        Ok(Some(new_path))
+    }
+
+    /// Permanently deletes the folder at `path` and everything inside it,
+    /// removing all affected notes from the vault. Returns the number of notes
+    /// that were removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be removed.
+    pub fn delete_folder(&mut self, path: &Path) -> io::Result<usize> {
+        fs::remove_dir_all(path)?;
+        let before = self.notes.len();
+        self.notes.retain(|note| !note.path.starts_with(path));
+        self.rebuild_tree();
+        Ok(before - self.notes.len())
     }
 
     /// Permanently deletes every trashed note. Returns the number of deleted
@@ -429,21 +537,30 @@ impl Vault {
                 index += 1;
             }
         }
+        if deleted > 0 {
+            self.rebuild_tree();
+        }
         Ok(deleted)
     }
 
-    /// Scans a directory for markdown files and appends them as notes.
+    /// Scans a directory recursively for markdown files and appends them as
+    /// notes. Hidden entries (which includes the trash directory) are skipped,
+    /// mirroring the rules of [`build_tree`].
     fn scan_dir(dir: &Path, notes: &mut Vec<Note>) -> io::Result<()> {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
-            if !path.is_file() || !is_markdown(&path) || is_hidden(&path) {
+            if is_hidden(&path) {
                 continue;
             }
-            let Ok(text) = fs::read_to_string(&path) else {
-                continue;
-            };
-            notes.push(Note::from_text(path, text));
+            if path.is_dir() {
+                Self::scan_dir(&path, notes)?;
+            } else if is_markdown(&path) {
+                let Ok(text) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                notes.push(Note::from_text(path, text));
+            }
         }
         Ok(())
     }
@@ -458,6 +575,193 @@ impl Vault {
                 .then_with(|| a.title.cmp(&b.title))
         });
     }
+
+    /// The directory tree of the vault, rebuilt whenever the notes change.
+    #[must_use]
+    pub fn tree(&self) -> &Tree {
+        &self.tree
+    }
+
+    /// Rebuilds the directory tree from the current state of the vault on disk.
+    fn rebuild_tree(&mut self) {
+        self.tree = build_tree(&self.root).unwrap_or_default();
+    }
+}
+
+/// A node in the vault's directory tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TreeNode {
+    /// A directory that may contain notes and further directories.
+    Folder {
+        /// The directory name.
+        name: String,
+        /// The absolute path of the directory.
+        path: PathBuf,
+    },
+    /// A single note file.
+    File {
+        /// The note title (the file stem).
+        name: String,
+        /// The absolute path of the file.
+        path: PathBuf,
+        /// The last modification time of the file, used to order notes with
+        /// the most recently updated at the top.
+        modified: SystemTime,
+    },
+}
+
+impl TreeNode {
+    /// The display name: the directory name or the note title.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Folder { name, .. } | Self::File { name, .. } => name,
+        }
+    }
+
+    /// The absolute path of this node.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Folder { path, .. } | Self::File { path, .. } => path,
+        }
+    }
+
+    /// Whether this node is a directory.
+    #[must_use]
+    pub fn is_folder(&self) -> bool {
+        matches!(self, Self::Folder { .. })
+    }
+}
+
+/// A snapshot of the vault's directory structure.
+///
+/// The tree is a pure view of the vault on disk: it holds no UI state. The
+/// expansion state of folders is tracked by the application instead, so the
+/// tree can be rebuilt freely whenever notes change.
+#[derive(Debug, Clone, Default)]
+pub struct Tree {
+    /// The children of the vault root.
+    root: Vec<TreeNode>,
+    /// The children of every directory, keyed by its path.
+    children: HashMap<PathBuf, Vec<TreeNode>>,
+}
+
+impl Tree {
+    /// The top-level nodes of the vault.
+    #[must_use]
+    pub fn root(&self) -> &[TreeNode] {
+        &self.root
+    }
+
+    /// The children of the directory with the given path, if it is known.
+    #[must_use]
+    pub fn children_of(&self, path: &Path) -> Option<&[TreeNode]> {
+        self.children.get(path).map(Vec::as_slice)
+    }
+}
+
+/// Builds the directory tree of the vault rooted at `root`.
+///
+/// Hidden entries (which includes the trash directory) and anything that is
+/// neither a directory nor a markdown file are skipped, mirroring the rules of
+/// [`Vault::scan_dir`]. Folders always sort before files, then by name.
+fn build_tree(root: &Path) -> io::Result<Tree> {
+    let mut tree = Tree::default();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if is_hidden(&path) {
+            continue;
+        }
+        if path.is_dir() {
+            if let Ok(children) = scan_children(&path, &mut tree) {
+                tree.children.insert(path.clone(), children);
+            }
+            tree.root.push(TreeNode::Folder {
+                name: file_name(&path),
+                path,
+            });
+        } else if is_markdown(&path) {
+            tree.root.push(TreeNode::File {
+                name: file_stem(&path),
+                modified: modified_time(&path),
+                path,
+            });
+        }
+    }
+    tree.root.sort_by(sort_nodes);
+    Ok(tree)
+}
+
+/// Recursively scans a directory, returning its children and recording their
+/// descendants in `tree.children`.
+fn scan_children(dir: &Path, tree: &mut Tree) -> io::Result<Vec<TreeNode>> {
+    let mut nodes = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if is_hidden(&path) {
+            continue;
+        }
+        if path.is_dir() {
+            if let Ok(children) = scan_children(&path, tree) {
+                tree.children.insert(path.clone(), children);
+            }
+            nodes.push(TreeNode::Folder {
+                name: file_name(&path),
+                path,
+            });
+        } else if is_markdown(&path) {
+            nodes.push(TreeNode::File {
+                name: file_stem(&path),
+                modified: modified_time(&path),
+                path,
+            });
+        }
+    }
+    nodes.sort_by(sort_nodes);
+    Ok(nodes)
+}
+
+/// The last modification time of a file, defaulting to the epoch when the
+/// metadata cannot be read.
+fn modified_time(path: &Path) -> SystemTime {
+    fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .unwrap_or(UNIX_EPOCH)
+}
+
+/// Orders tree nodes: directories before files (folders by name), then files
+/// by modification time descending so the most recently updated note is at the
+/// top, falling back to name (case-insensitive) when times tie.
+fn sort_nodes(a: &TreeNode, b: &TreeNode) -> Ordering {
+    match (a.is_folder(), b.is_folder()) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (true, true) => a.name().to_lowercase().cmp(&b.name().to_lowercase()),
+        (false, false) => match (a, b) {
+            (TreeNode::File { modified: am, .. }, TreeNode::File { modified: bm, .. }) => {
+                bm.cmp(am)
+                    .then_with(|| a.name().to_lowercase().cmp(&b.name().to_lowercase()))
+            }
+            _ => Ordering::Equal,
+        },
+    }
+}
+
+/// The file name of a path, as a string.
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// The file stem of a path, as a string.
+fn file_stem(path: &Path) -> String {
+    path.file_stem()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// A minimal YAML-like frontmatter block delimited by `---` lines.
@@ -601,6 +905,18 @@ fn unique_path(dir: &Path, stem: &str) -> PathBuf {
     candidate
 }
 
+/// Returns a directory path in `dir` with the given name that does not exist
+/// yet, by appending ` 2`, ` 3`, … when necessary.
+fn unique_dir_path(dir: &Path, name: &str) -> PathBuf {
+    let mut candidate = dir.join(name);
+    let mut n = 2;
+    while candidate.exists() {
+        candidate = dir.join(format!("{name} {n}"));
+        n += 1;
+    }
+    candidate
+}
+
 /// Returns a path for a conflict copy of the note at `path`.
 fn conflict_path(path: &Path) -> PathBuf {
     let stem = path.file_stem().map_or_else(
@@ -621,6 +937,7 @@ fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
 }
 
 /// Restores the modification time of a file.
+#[allow(dead_code)] // Used by the retained preview-preference API.
 fn set_modified_time(path: &Path, time: SystemTime) -> io::Result<()> {
     let file = fs::File::options().write(true).open(path)?;
     file.set_times(fs::FileTimes::new().set_modified(time))?;
@@ -783,6 +1100,79 @@ mod tests {
     }
 
     #[test]
+    fn folder_create_rename_and_delete() {
+        let dir = temp_dir();
+        let mut vault = Vault::open(&dir).expect("open");
+        let root = vault.root().to_path_buf();
+
+        // Creating a folder makes it unique and visible in the tree.
+        let folder = vault
+            .create_folder(&root, "Ideas")
+            .expect("create")
+            .expect("name");
+        assert!(folder.is_dir());
+        let duplicate = vault
+            .create_folder(&root, "Ideas")
+            .expect("create")
+            .expect("name");
+        assert_eq!(duplicate, root.join("Ideas 2"));
+        assert!(vault.tree().root().iter().any(|node| node.path() == folder));
+
+        // A note inside the folder is scanned on reopen.
+        let note_path = folder.join("Draft.md");
+        fs::write(
+            &note_path,
+            "---\npinned: false\ncreated: 2026-01-01T00:00:00Z\n---\nBody\n",
+        )
+        .expect("write");
+        let reopened = Vault::open(&dir).expect("reopen");
+        assert!(reopened.notes().iter().any(|note| note.path() == note_path));
+
+        // Renaming the folder moves the note with it.
+        let mut vault = Vault::open(&dir).expect("reopen");
+        let renamed = vault
+            .rename_folder(&folder, "Work")
+            .expect("rename")
+            .expect("name");
+        assert_eq!(renamed, folder.with_file_name("Work"));
+        assert!(renamed.is_dir());
+        assert!(!folder.exists());
+        assert!(renamed.join("Draft.md").is_file());
+        assert!(
+            vault
+                .notes()
+                .iter()
+                .any(|note| note.path() == renamed.join("Draft.md"))
+        );
+
+        // Deleting the folder removes the note too.
+        let deleted = vault.delete_folder(&renamed).expect("delete");
+        assert_eq!(deleted, 1);
+        assert!(!renamed.exists());
+        assert!(
+            !vault
+                .notes()
+                .iter()
+                .any(|note| note.path().starts_with(&renamed))
+        );
+        // The duplicate created earlier in the test remains.
+        assert!(
+            vault
+                .tree()
+                .root()
+                .iter()
+                .any(|node| node.path() == duplicate)
+        );
+        assert!(
+            vault
+                .tree()
+                .root()
+                .iter()
+                .all(|node| node.path() != renamed)
+        );
+    }
+
+    #[test]
     fn unique_names() {
         let dir = temp_dir();
         let mut vault = Vault::open(&dir).expect("open");
@@ -926,7 +1316,11 @@ mod tests {
             .expect("set preview")
             .expect("note");
         assert!(!off.preview());
-        assert!(fs::read_to_string(&path).expect("read").contains("preview: false"));
+        assert!(
+            fs::read_to_string(&path)
+                .expect("read")
+                .contains("preview: false")
+        );
     }
 
     #[test]
@@ -1029,5 +1423,110 @@ mod tests {
 
         let titles: Vec<&str> = vault.notes().iter().map(Note::title).collect();
         assert_eq!(titles, vec!["B", "C", "A"]);
+    }
+
+    #[test]
+    fn tree_mirrors_disk_structure() {
+        let dir = temp_dir();
+        fs::create_dir(dir.join("Projects")).expect("mkdir");
+        fs::create_dir(dir.join("Projects").join("Ideas")).expect("mkdir");
+        fs::write(dir.join("Projects").join("Ideas").join("Draft.md"), "draft").expect("write");
+        fs::write(dir.join("Projects").join("Readme.md"), "readme").expect("write");
+        fs::write(dir.join("Shopping.md"), "shopping").expect("write");
+
+        let vault = Vault::open(&dir).expect("open");
+        let tree = vault.tree();
+
+        let root: Vec<&str> = tree.root().iter().map(TreeNode::name).collect();
+        // Folders sort before files.
+        assert_eq!(root, vec!["Projects", "Shopping"]);
+
+        let projects = tree
+            .root()
+            .iter()
+            .find(|node| node.name() == "Projects")
+            .expect("projects folder");
+        let projects_children: Vec<&str> = tree
+            .children_of(projects.path())
+            .expect("children")
+            .iter()
+            .map(TreeNode::name)
+            .collect();
+        assert_eq!(projects_children, vec!["Ideas", "Readme"]);
+
+        let ideas = tree
+            .children_of(projects.path())
+            .expect("children")
+            .iter()
+            .find(|node| node.name() == "Ideas")
+            .expect("ideas folder");
+        let ideas_children: Vec<&str> = tree
+            .children_of(ideas.path())
+            .expect("children")
+            .iter()
+            .map(TreeNode::name)
+            .collect();
+        assert_eq!(ideas_children, vec!["Draft"]);
+    }
+
+    #[test]
+    fn tree_excludes_hidden_and_non_markdown() {
+        let dir = temp_dir();
+        fs::create_dir(dir.join(".secret")).expect("mkdir");
+        fs::write(dir.join(".secret").join("Note.md"), "ignored").expect("write");
+        fs::write(dir.join(".hidden.md"), "ignored").expect("write");
+        fs::write(dir.join("readme.txt"), "ignored").expect("write");
+
+        let vault = Vault::open(&dir).expect("open");
+        assert!(vault.tree().root().is_empty());
+    }
+
+    #[test]
+    fn tree_updates_on_mutation() {
+        let dir = temp_dir();
+        let mut vault = Vault::open(&dir).expect("open");
+
+        let note = vault.create("Draft").expect("create").expect("title");
+        let root: Vec<&str> = vault.tree().root().iter().map(TreeNode::name).collect();
+        assert_eq!(root, vec!["Draft"]);
+
+        // Trashing removes the note from the tree (the trash dir is hidden).
+        let trashed = vault.trash(note.path()).expect("trash").expect("note");
+        assert!(vault.tree().root().is_empty());
+
+        // Restoring puts it back.
+        vault
+            .restore(trashed.path())
+            .expect("restore")
+            .expect("note");
+        let root: Vec<&str> = vault.tree().root().iter().map(TreeNode::name).collect();
+        assert_eq!(root, vec!["Draft"]);
+    }
+
+    #[test]
+    fn tree_sorts_folders_before_files_then_by_mtime() {
+        let dir = temp_dir();
+        fs::create_dir(dir.join("Zeta")).expect("mkdir");
+        fs::write(dir.join("alpha.md"), "a").expect("write");
+        fs::write(dir.join("Beta.md"), "b").expect("write");
+
+        // Give the files explicit, distinct modification times so the mtime
+        // ordering is deterministic regardless of how fast the writes happen.
+        let set_mtime = |name: &str, secs: u64| {
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .open(dir.join(name))
+                .expect("open");
+            file.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(secs))
+                .expect("set mtime");
+        };
+        set_mtime("alpha.md", 100);
+        set_mtime("Beta.md", 200);
+
+        let vault = Vault::open(&dir).expect("open");
+        let root: Vec<&str> = vault.tree().root().iter().map(TreeNode::name).collect();
+        // Folder first despite sorting after "alpha" alphabetically; the most
+        // recently updated file (Beta) comes before the older one (alpha).
+        assert_eq!(root, vec!["Zeta", "Beta", "alpha"]);
     }
 }
