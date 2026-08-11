@@ -15,7 +15,7 @@ use cosmic::prelude::*;
 use cosmic::widget::menu::{ItemHeight, ItemWidth};
 use cosmic::widget::{
     self, Toasts, about::About, button, divider, icon, menu, nav_bar, popover, responsive_menu_bar,
-    text_editor, text_input, toaster, tooltip,
+    segmented_button, text_editor, text_input, toaster, tooltip,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -123,27 +123,11 @@ pub struct AppModel {
     config: Config,
     /// The note store.
     vault: Vault,
-    /// The note currently open in the editor, if any.
-    selected: Option<PathBuf>,
-    /// The blocks of the active note, each with an editable text buffer.
-    blocks: Vec<EditableBlock>,
-    /// The index of the block the toolbar acts on (the last one focused).
-    selected_block: usize,
-    /// Undo history: snapshots of the whole document, newest last.
-    undo_stack: Vec<Vec<editor::Block>>,
-    /// Redo history, cleared by any new edit.
-    redo_stack: Vec<Vec<editor::Block>>,
-    /// When the last undo snapshot was taken and in which block, so that
-    /// bursts of typing collapse into a single undo step.
-    last_undo_at: Option<(Instant, usize)>,
-    /// The block index whose slash command menu is open, if any.
-    slash_menu: Option<usize>,
-    /// The highlighted entry of the open slash menu.
-    slash_selection: usize,
-    /// The title being edited for the active note.
-    title_draft: String,
-    /// Whether the editor has unsaved changes.
-    dirty: bool,
+    /// The open editor tabs, keyed by the segmented button model: each tab
+    /// carries its note path and editor state.
+    tab_model: segmented_button::SingleSelectModel,
+    /// The config handler used to persist settings when they change.
+    config_handler: Option<cosmic_config::Config>,
     /// Toast notifications.
     toasts: Toasts<Message>,
     /// The open sidebar folder dialog (create or rename), if any.
@@ -167,6 +151,12 @@ pub enum Message {
     SelectNote(PathBuf),
     /// Create a new note.
     NewNote,
+    /// The tab with the given id was activated in the tab bar.
+    TabActivate(segmented_button::Entity),
+    /// The tab with the given id should be closed.
+    TabClose(segmented_button::Entity),
+    /// Create a new tab.
+    TabNew,
     /// The title input changed.
     EditTitle(String),
     /// Commit the current title as a rename.
@@ -372,6 +362,99 @@ impl EditableBlock {
     }
 }
 
+/// A tab in the editor: the open note plus its editor state. A tab with no
+/// note path is a fresh "+" tab: the editor pane shows the empty state until
+/// a note is picked from the sidebar, which loads into it.
+struct Tab {
+    /// The path of the note this tab edits, if any.
+    path: Option<PathBuf>,
+    /// The blocks of the note, each with an editable text buffer.
+    blocks: Vec<EditableBlock>,
+    /// The index of the block the toolbar acts on (the last one focused).
+    selected_block: usize,
+    /// Undo history: snapshots of the whole document, newest last.
+    undo_stack: Vec<Vec<editor::Block>>,
+    /// Redo history, cleared by any new edit.
+    redo_stack: Vec<Vec<editor::Block>>,
+    /// When the last undo snapshot was taken and in which block, so that
+    /// bursts of typing collapse into a single undo step.
+    last_undo_at: Option<(Instant, usize)>,
+    /// The block index whose slash command menu is open, if any.
+    slash_menu: Option<usize>,
+    /// The highlighted entry of the open slash menu.
+    slash_selection: usize,
+    /// The title being edited for this tab.
+    title_draft: String,
+    /// Whether this tab has unsaved changes.
+    dirty: bool,
+}
+
+impl Tab {
+    /// Builds an editor tab for the note at `path`, loaded from `body` and
+    /// `title`. An empty note still gets one empty block so the editor has a
+    /// focusable surface that shows the placeholder.
+    fn new(path: PathBuf, body: &str, title: &str) -> Self {
+        let mut blocks: Vec<EditableBlock> = editor::parse_markdown(body)
+            .into_iter()
+            .map(EditableBlock::from_block)
+            .collect();
+        if blocks.is_empty() {
+            blocks.push(EditableBlock::from_block(editor::Block::paragraph("")));
+        }
+        Self {
+            path: Some(path),
+            blocks,
+            selected_block: 0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            last_undo_at: None,
+            slash_menu: None,
+            slash_selection: 0,
+            title_draft: title.to_owned(),
+            dirty: false,
+        }
+    }
+
+    /// Loads the given body and title into this tab, resetting its editor
+    /// state (undo history, slash menu, dirty flag).
+    fn load_body(&mut self, body: &str, title: &str) {
+        let mut blocks: Vec<EditableBlock> = editor::parse_markdown(body)
+            .into_iter()
+            .map(EditableBlock::from_block)
+            .collect();
+        // An empty note still gets one empty block so the editor has a
+        // focusable surface that shows the placeholder.
+        if blocks.is_empty() {
+            blocks.push(EditableBlock::from_block(editor::Block::paragraph("")));
+        }
+        self.blocks = blocks;
+        self.selected_block = 0;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.last_undo_at = None;
+        self.slash_menu = None;
+        title.clone_into(&mut self.title_draft);
+        self.dirty = false;
+    }
+
+    /// A fresh, empty tab with no note behind it yet. The editor pane shows
+    /// the empty state until a note is picked from the sidebar.
+    fn blank() -> Self {
+        Self {
+            path: None,
+            blocks: Vec::new(),
+            selected_block: 0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            last_undo_at: None,
+            slash_menu: None,
+            slash_selection: 0,
+            title_draft: String::new(),
+            dirty: false,
+        }
+    }
+}
+
 /// Create a COSMIC application from the app model
 impl cosmic::Application for AppModel {
     /// The async executor that will be used to run your application's commands.
@@ -410,7 +493,7 @@ impl cosmic::Application for AppModel {
                 self.core.nav_bar_set_toggled(true);
                 Task::none()
             }
-            Some(NavEntry::Note(path)) => self.open_note(&path),
+            Some(NavEntry::Note(path)) => self.open_tab(&path, false),
             None => Task::none(),
         }
     }
@@ -494,6 +577,11 @@ impl cosmic::Application for AppModel {
                 match self.nav_model.data::<NavEntry>(entity).cloned() {
                     Some(NavEntry::Folder(_)) => {
                         items.push(menu::Item::Button(
+                            fl!("new-note"),
+                            None,
+                            NavMenuAction::NewNoteIn(entity),
+                        ));
+                        items.push(menu::Item::Button(
                             fl!("new-folder"),
                             None,
                             NavMenuAction::NewFolderIn(entity),
@@ -511,6 +599,12 @@ impl cosmic::Application for AppModel {
                         ));
                     }
                     Some(NavEntry::Note(_)) => {
+                        items.push(menu::Item::Button(
+                            fl!("open-in-new-tab"),
+                            None,
+                            NavMenuAction::OpenInNewTab(entity),
+                        ));
+                        items.push(menu::Item::Divider);
                         items.push(menu::Item::Button(
                             fl!("delete"),
                             None,
@@ -593,8 +687,10 @@ impl cosmic::Application for AppModel {
             .links([(fl!("repository"), REPOSITORY)])
             .license(env!("CARGO_PKG_LICENSE"));
 
-        let config = cosmic_config::Config::new(Self::APP_ID, Config::VERSION)
-            .map(|context| match Config::get_entry(&context) {
+        let config_handler = cosmic_config::Config::new(Self::APP_ID, Config::VERSION).ok();
+        let config = config_handler
+            .as_ref()
+            .map(|context| match Config::get_entry(context) {
                 Ok(config) => config,
                 Err((_errors, config)) => config,
             })
@@ -610,22 +706,30 @@ impl cosmic::Application for AppModel {
             expanded: HashSet::new(),
             key_binds: Shortcut::key_binds(),
             config,
+            config_handler,
             vault,
-            selected: None,
-            blocks: Vec::new(),
-            selected_block: 0,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            last_undo_at: None,
-            slash_menu: None,
-            slash_selection: 0,
-            title_draft: String::new(),
-            dirty: false,
+            tab_model: segmented_button::SingleSelectModel::default(),
             toasts: Toasts::new(Message::ToastClosed),
             sidebar_dialog: None,
             sidebar_context_menu_point: None,
         };
         app.rebuild_nav_model();
+
+        // Restore the note that was open when the app last closed as a tab.
+        if let Some(relative) = app.config.last_note() {
+            let path = app.vault.root().join(relative);
+            let note = app
+                .vault
+                .notes()
+                .iter()
+                .find(|note| note.path() == path && !note.in_trash());
+            if let Some(note) = note {
+                let body = note.body().to_owned();
+                let title = note.title().to_owned();
+                app.new_tab(path, &body, &title);
+                app.rebuild_nav_model();
+            }
+        }
 
         // Create a startup command that sets the window title.
         let command = app.update_title();
@@ -658,10 +762,10 @@ impl cosmic::Application for AppModel {
 
     /// Elements to pack at the end of the header bar.
     fn header_end(&self) -> Vec<Element<'_, Self::Message>> {
-        let new_note = button::icon(icon::from_name("list-add-symbolic"))
-            .on_press(Message::NewNote)
+        let settings = button::icon(icon::from_name("emblem-system-symbolic"))
+            .on_press(Message::ToggleContextPage(ContextPage::Settings))
             .class(cosmic::theme::Button::Icon);
-        vec![Self::tooltip(new_note.into(), fl!("new-note"))]
+        vec![Self::tooltip(settings.into(), fl!("settings"))]
     }
 
     /// Display a context drawer if the context page is requested.
@@ -676,6 +780,11 @@ impl cosmic::Application for AppModel {
                 |url| Message::LaunchUrl(url.to_string()),
                 Message::ToggleContextPage(ContextPage::About),
             ),
+            ContextPage::Settings => context_drawer::context_drawer(
+                self.settings(),
+                Message::ToggleContextPage(ContextPage::Settings),
+            )
+            .title(fl!("settings")),
         })
     }
 
@@ -713,7 +822,7 @@ impl cosmic::Application for AppModel {
         ];
 
         // Conditionally enables a timer that emits a message every second.
-        if self.dirty {
+        if self.active_tab().is_some_and(|tab| tab.dirty) {
             subscriptions.push(Subscription::run(|| {
                 cosmic::iced::stream::channel(1, |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
                     let mut interval = tokio::time::interval(AUTOSAVE_INTERVAL);
@@ -775,7 +884,7 @@ impl cosmic::Application for AppModel {
                 Shortcut::Save => self.save_active(true),
             },
 
-            Message::SelectNote(path) => self.open_note(&path),
+            Message::SelectNote(path) => self.open_tab(&path, false),
 
             Message::NewNote => {
                 // A "New Note" chosen from the sidebar menu dismisses it.
@@ -783,8 +892,44 @@ impl cosmic::Application for AppModel {
                 self.new_note()
             }
 
+            Message::TabActivate(entity) => {
+                // Switching tabs commits the current title and autosaves the
+                // outgoing tab's changes, then activates the new one.
+                self.commit_title_rename();
+                let save = self.save_active(false);
+                self.tab_model.activate(entity);
+                let path = self.active_tab().and_then(|tab| tab.path.clone());
+                if let Some(path) = &path {
+                    self.remember_last_tab(path);
+                }
+                self.rebuild_nav_model();
+                Task::batch([save, self.update_title()])
+            }
+
+            Message::TabClose(entity) => {
+                self.close_tab(entity);
+                self.update_title()
+            }
+
+            Message::TabNew => {
+                // The "+" button opens a fresh, blank tab showing the empty
+                // state; the note is created (or picked) afterwards.
+                self.sidebar_context_menu_point = None;
+                let save = self.save_active(false);
+                self.tab_model
+                    .insert()
+                    .text(fl!("untitled"))
+                    .data::<Tab>(Tab::blank())
+                    .closable()
+                    .activate();
+                self.rebuild_nav_model();
+                Task::batch([save, self.update_title()])
+            }
+
             Message::EditTitle(title) => {
-                self.title_draft = title;
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.title_draft = title;
+                }
                 Task::none()
             }
 
@@ -799,8 +944,10 @@ impl cosmic::Application for AppModel {
                 match action {
                     NavMenuAction::NewFolder => self.open_folder_dialog(None),
                     NavMenuAction::NewFolderIn(entity) => self.open_folder_dialog(Some(entity)),
+                    NavMenuAction::NewNoteIn(entity) => self.new_note_in_folder(entity),
                     NavMenuAction::RenameFolder(entity) => self.open_rename_dialog(entity),
                     NavMenuAction::DeleteItem(entity) => self.delete_sidebar_item(entity),
+                    NavMenuAction::OpenInNewTab(entity) => self.open_sidebar_item_new_tab(entity),
                 }
             }
 
@@ -858,16 +1005,19 @@ impl cosmic::Application for AppModel {
                     {
                         Ok(Some(new_path)) => {
                             self.remap_expanded(&path, &new_path);
-                            if let Some(selected) = &self.selected
-                                && selected.starts_with(&path)
-                            {
-                                self.selected = Some(
-                                    new_path.join(
-                                        selected
-                                            .strip_prefix(&path)
-                                            .expect("path was checked with starts_with"),
-                                    ),
-                                );
+                            // Keep the tabs under the renamed folder pointing
+                            // at the notes they were already editing.
+                            let entities: Vec<_> = self.tab_model.iter().collect();
+                            for entity in entities {
+                                if let Some(tab) = self.tab_model.data_mut::<Tab>(entity)
+                                    && let Some(tab_path) = tab.path.as_ref()
+                                    && tab_path.starts_with(&path)
+                                {
+                                    let relative = tab_path
+                                        .strip_prefix(&path)
+                                        .expect("path was checked with starts_with");
+                                    tab.path = Some(new_path.join(relative));
+                                }
                             }
                             self.rebuild_nav_model();
                             Task::batch([self.toast(fl!("folder-renamed")), self.update_title()])
@@ -887,36 +1037,42 @@ impl cosmic::Application for AppModel {
             }
 
             Message::BlockAction { index, action } => {
-                self.selected_block = index;
+                let Some(tab) = self.active_tab_mut() else {
+                    return Task::none();
+                };
+                tab.selected_block = index;
                 // A multi-line paste splits into blocks, like Futo; the
                 // editor's default behavior would embed raw newlines into
                 // the block.
-                if let Some(task) = self.intercept_paste(index, &action) {
+                if let Some(task) = Self::intercept_paste(tab, index, &action) {
                     return Task::batch([task, self.update_title()]);
                 }
                 let is_edit = action.is_edit();
                 if is_edit {
-                    self.push_undo(index);
+                    Self::push_undo(tab, index);
                 }
-                let Some(block) = self.blocks.get_mut(index) else {
+                let Some(block) = tab.blocks.get_mut(index) else {
                     return Task::none();
                 };
                 block.content.perform(action);
                 if is_edit {
-                    self.mark_dirty();
+                    tab.dirty = true;
                 }
                 self.update_title()
             }
 
             Message::ToggleTodo(index) => {
-                self.selected_block = index;
-                self.push_undo_step();
-                let Some(block) = self.blocks.get_mut(index) else {
+                let Some(tab) = self.active_tab_mut() else {
+                    return Task::none();
+                };
+                tab.selected_block = index;
+                Self::push_undo_step(tab);
+                let Some(block) = tab.blocks.get_mut(index) else {
                     return Task::none();
                 };
                 if let BlockKind::Todo(_, done) = &mut block.kind {
                     *done = !*done;
-                    self.mark_dirty();
+                    tab.dirty = true;
                 }
                 self.update_title()
             }
@@ -927,21 +1083,24 @@ impl cosmic::Application for AppModel {
                 before,
                 after,
             } => {
-                self.push_undo_step();
-                let Some(block) = self.blocks.get_mut(index) else {
+                let Some(tab) = self.active_tab_mut() else {
+                    return Task::none();
+                };
+                Self::push_undo_step(tab);
+                let Some(block) = tab.blocks.get_mut(index) else {
                     return Task::none();
                 };
                 block.content = text_editor::Content::with_text(&before);
-                self.blocks.insert(
+                tab.blocks.insert(
                     index + 1,
                     EditableBlock {
                         kind,
                         content: text_editor::Content::with_text(&after),
                     },
                 );
-                renumber_blocks(&mut self.blocks);
-                self.selected_block = index + 1;
-                self.mark_dirty();
+                renumber_blocks(&mut tab.blocks);
+                tab.selected_block = index + 1;
+                tab.dirty = true;
                 Task::batch([
                     Self::focus_block(index + 1).map(cosmic::action::app),
                     self.update_title(),
@@ -953,49 +1112,58 @@ impl cosmic::Application for AppModel {
                 kind,
                 content,
             } => {
-                self.selected_block = index;
-                self.push_undo_step();
-                let Some(block) = self.blocks.get_mut(index) else {
+                let Some(tab) = self.active_tab_mut() else {
+                    return Task::none();
+                };
+                tab.selected_block = index;
+                Self::push_undo_step(tab);
+                let Some(block) = tab.blocks.get_mut(index) else {
                     return Task::none();
                 };
                 block.kind = kind;
                 block.content = text_editor::Content::with_text(&content);
-                renumber_blocks(&mut self.blocks);
-                self.mark_dirty();
+                renumber_blocks(&mut tab.blocks);
+                tab.dirty = true;
                 self.update_title()
             }
 
             Message::ChangeLevel { index, delta } => {
-                self.selected_block = index;
-                self.push_undo_step();
-                let Some(block) = self.blocks.get_mut(index) else {
+                let Some(tab) = self.active_tab_mut() else {
+                    return Task::none();
+                };
+                tab.selected_block = index;
+                Self::push_undo_step(tab);
+                let Some(block) = tab.blocks.get_mut(index) else {
                     return Task::none();
                 };
                 let Some(kind) = Self::shift_level(&block.kind, delta) else {
                     return Task::none();
                 };
                 block.kind = kind;
-                renumber_blocks(&mut self.blocks);
-                self.mark_dirty();
+                renumber_blocks(&mut tab.blocks);
+                tab.dirty = true;
                 self.update_title()
             }
 
             Message::MergeUp { index } => {
-                if index == 0 || index >= self.blocks.len() {
+                let Some(tab) = self.active_tab_mut() else {
+                    return Task::none();
+                };
+                if index == 0 || index >= tab.blocks.len() {
                     return Task::none();
                 }
-                self.push_undo_step();
-                let merged = self.blocks.remove(index);
-                let Some(prev) = self.blocks.get_mut(index - 1) else {
+                Self::push_undo_step(tab);
+                let merged = tab.blocks.remove(index);
+                let Some(prev) = tab.blocks.get_mut(index - 1) else {
                     return Task::none();
                 };
                 let text = prev.content.text() + &merged.content.text();
                 prev.content = text_editor::Content::with_text(&text);
                 let cursor = Self::end_cursor(&prev.content);
                 prev.content.move_to(cursor);
-                renumber_blocks(&mut self.blocks);
-                self.selected_block = index - 1;
-                self.mark_dirty();
+                renumber_blocks(&mut tab.blocks);
+                tab.selected_block = index - 1;
+                tab.dirty = true;
                 Task::batch([
                     Self::focus_block(index - 1).map(cosmic::action::app),
                     self.update_title(),
@@ -1003,11 +1171,14 @@ impl cosmic::Application for AppModel {
             }
 
             Message::FocusPrevious(index) => {
-                let Some(target) = Self::previous_editable(&self.blocks, index) else {
+                let Some(tab) = self.active_tab_mut() else {
                     return Task::none();
                 };
-                self.selected_block = target;
-                let Some(block) = self.blocks.get_mut(target) else {
+                let Some(target) = Self::previous_editable(&tab.blocks, index) else {
+                    return Task::none();
+                };
+                tab.selected_block = target;
+                let Some(block) = tab.blocks.get_mut(target) else {
                     return Task::none();
                 };
                 let cursor = Self::end_cursor(&block.content);
@@ -1016,11 +1187,14 @@ impl cosmic::Application for AppModel {
             }
 
             Message::FocusNext(index) => {
-                let Some(target) = Self::next_editable(&self.blocks, index) else {
+                let Some(tab) = self.active_tab_mut() else {
                     return Task::none();
                 };
-                self.selected_block = target;
-                let Some(block) = self.blocks.get_mut(target) else {
+                let Some(target) = Self::next_editable(&tab.blocks, index) else {
+                    return Task::none();
+                };
+                tab.selected_block = target;
+                let Some(block) = tab.blocks.get_mut(target) else {
                     return Task::none();
                 };
                 block.content.move_to(text_editor::Cursor {
@@ -1031,14 +1205,20 @@ impl cosmic::Application for AppModel {
             }
 
             Message::FormatBlock { index, kind } => {
-                self.selected_block = index;
-                Task::batch([self.format_block(index, kind), self.update_title()])
+                let Some(tab) = self.active_tab_mut() else {
+                    return Task::none();
+                };
+                tab.selected_block = index;
+                Task::batch([Self::format_block(tab, index, kind), self.update_title()])
             }
 
             Message::WrapInline { index, marker } => {
-                self.selected_block = index;
-                self.push_undo_step();
-                let Some(block) = self.blocks.get_mut(index) else {
+                let Some(tab) = self.active_tab_mut() else {
+                    return Task::none();
+                };
+                tab.selected_block = index;
+                Self::push_undo_step(tab);
+                let Some(block) = tab.blocks.get_mut(index) else {
                     return Task::none();
                 };
                 // Code and divider blocks keep their own layout; inline
@@ -1064,8 +1244,13 @@ impl cosmic::Application for AppModel {
                     (anchor.line == cursor.position.line)
                         .then_some((anchor.column, cursor.position.column))
                 });
-                let result =
-                    editor::wrap_inline(&line.text, selection, cursor.position.column, open, close);
+                let result = editor::wrap_inline(
+                    &line.text,
+                    selection,
+                    cursor.position.column,
+                    open,
+                    close,
+                );
                 let mut lines: Vec<String> = block
                     .content
                     .lines()
@@ -1080,7 +1265,7 @@ impl cosmic::Application for AppModel {
                     },
                     selection: None,
                 });
-                self.mark_dirty();
+                tab.dirty = true;
                 Task::batch([
                     Self::focus_block(index).map(cosmic::action::app),
                     self.update_title(),
@@ -1088,68 +1273,91 @@ impl cosmic::Application for AppModel {
             }
 
             Message::InsertDivider(index) => {
-                self.selected_block = index;
+                let Some(tab) = self.active_tab_mut() else {
+                    return Task::none();
+                };
+                tab.selected_block = index;
                 Task::batch([
-                    self.format_block(index, BlockKind::Divider),
+                    Self::format_block(tab, index, BlockKind::Divider),
                     self.update_title(),
                 ])
             }
 
             Message::Undo => {
-                let Some(previous) = self.undo_stack.pop() else {
+                let Some(tab) = self.active_tab_mut() else {
                     return Task::none();
                 };
-                let current = self.snapshot_blocks();
-                self.redo_stack.push(current);
-                self.restore_blocks(previous)
+                let Some(previous) = tab.undo_stack.pop() else {
+                    return Task::none();
+                };
+                let current = Self::snapshot_tab(tab);
+                tab.redo_stack.push(current);
+                Task::batch([Self::restore_blocks(tab, previous), self.update_title()])
             }
 
             Message::Redo => {
-                let Some(next) = self.redo_stack.pop() else {
+                let Some(tab) = self.active_tab_mut() else {
                     return Task::none();
                 };
-                let current = self.snapshot_blocks();
-                self.undo_stack.push(current);
-                self.restore_blocks(next)
+                let Some(next) = tab.redo_stack.pop() else {
+                    return Task::none();
+                };
+                let current = Self::snapshot_tab(tab);
+                tab.undo_stack.push(current);
+                Task::batch([Self::restore_blocks(tab, next), self.update_title()])
             }
 
             Message::SlashMenuOpen(index) => {
-                self.slash_menu = Some(index);
-                self.slash_selection = 0;
-                self.selected_block = index;
+                let Some(tab) = self.active_tab_mut() else {
+                    return Task::none();
+                };
+                tab.slash_menu = Some(index);
+                tab.slash_selection = 0;
+                tab.selected_block = index;
                 Task::none()
             }
 
             Message::SlashMenuClose => {
-                self.slash_menu = None;
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.slash_menu = None;
+                }
                 Task::none()
             }
 
             Message::SlashMenuMove(delta) => {
-                if self.slash_menu.is_none() {
+                let Some(tab) = self.active_tab_mut() else {
+                    return Task::none();
+                };
+                if tab.slash_menu.is_none() {
                     return Task::none();
                 }
-                self.slash_selection = if delta > 0 {
-                    (self.slash_selection + 1).min(SLASH_ITEMS.len() - 1)
+                tab.slash_selection = if delta > 0 {
+                    (tab.slash_selection + 1).min(SLASH_ITEMS.len() - 1)
                 } else {
-                    self.slash_selection.saturating_sub(1)
+                    tab.slash_selection.saturating_sub(1)
                 };
                 Task::none()
             }
 
             Message::SlashMenuSelect => {
-                let Some(index) = self.slash_menu.take() else {
+                let Some(tab) = self.active_tab_mut() else {
                     return Task::none();
                 };
-                let kind = SLASH_ITEMS[self.slash_selection].kind.clone();
-                self.selected_block = index;
-                Task::batch([self.format_block(index, kind), self.update_title()])
+                let Some(index) = tab.slash_menu.take() else {
+                    return Task::none();
+                };
+                let kind = SLASH_ITEMS[tab.slash_selection].kind.clone();
+                tab.selected_block = index;
+                Task::batch([Self::format_block(tab, index, kind), self.update_title()])
             }
 
             Message::SlashMenuPick { index, kind } => {
-                self.slash_menu = None;
-                self.selected_block = index;
-                Task::batch([self.format_block(index, kind), self.update_title()])
+                let Some(tab) = self.active_tab_mut() else {
+                    return Task::none();
+                };
+                tab.slash_menu = None;
+                tab.selected_block = index;
+                Task::batch([Self::format_block(tab, index, kind), self.update_title()])
             }
 
             Message::AutosaveTick => self.save_active(false),
@@ -1162,6 +1370,9 @@ impl cosmic::Application for AppModel {
     fn on_escape(&mut self) -> Task<cosmic::Action<Self::Message>> {
         self.sidebar_dialog = None;
         self.sidebar_context_menu_point = None;
+        if let Some(tab) = self.active_tab_mut() {
+            tab.slash_menu = None;
+        }
         Task::none()
     }
 
@@ -1173,70 +1384,201 @@ impl cosmic::Application for AppModel {
 }
 
 impl AppModel {
-    /// The note currently selected, if any.
-    fn selected_note(&self) -> Option<&Note> {
-        let path = self.selected.as_ref()?;
+    /// The active tab, if any.
+    fn active_tab(&self) -> Option<&Tab> {
+        self.tab_model.active_data::<Tab>()
+    }
+
+    /// The active tab, if any.
+    fn active_tab_mut(&mut self) -> Option<&mut Tab> {
+        self.tab_model.active_data_mut::<Tab>()
+    }
+
+    /// The note the active tab edits, if any.
+    fn active_note(&self) -> Option<&Note> {
+        let tab = self.active_tab()?;
+        let path = tab.path.as_ref()?;
         self.vault.notes().iter().find(|note| note.path() == path)
     }
 
-    /// The current markdown text of the editor, serialized from its blocks.
-    fn editor_text(&self) -> String {
-        let blocks: Vec<editor::Block> = self.blocks.iter().map(EditableBlock::to_block).collect();
+    /// The current markdown text of a tab, serialized from its blocks.
+    fn editor_text(tab: &Tab) -> String {
+        let blocks: Vec<editor::Block> = tab.blocks.iter().map(EditableBlock::to_block).collect();
         editor::serialize_markdown(&blocks)
     }
 
-    /// Marks the editor as having unsaved changes.
-    fn mark_dirty(&mut self) {
-        self.dirty = true;
+    /// Inserts a new tab for the note at `path` and makes it active.
+    fn new_tab(&mut self, path: PathBuf, body: &str, title: &str) {
+        self.tab_model
+            .insert()
+            .text(title.to_owned())
+            .data::<Tab>(Tab::new(path.clone(), body, title))
+            .closable()
+            .activate();
+        self.remember_last_tab(&path);
     }
 
-    /// Loads the given note into the editor.
-    fn load_note(&mut self, note: &Note) {
+    /// Opens the note at `path` in a tab: activating the existing tab for it
+    /// when one is open, loading it into the active blank tab when there is
+    /// one, or creating a new tab (`force_new` always inserts a fresh tab, for
+    /// "open in new tab").
+    fn open_tab(&mut self, path: &Path, force_new: bool) -> Task<cosmic::Action<Message>> {
+        self.commit_title_rename();
+        let save = self.save_active(false);
+        if !force_new {
+            // A note can only be open in one tab unless opened in a new tab
+            // explicitly, so switching re-activates the existing tab.
+            let mut activate_opt = None;
+            for entity in self.tab_model.iter() {
+                if self
+                    .tab_model
+                    .data::<Tab>(entity)
+                    .is_some_and(|tab| tab.path.as_deref() == Some(path))
+                {
+                    activate_opt = Some(entity);
+                    break;
+                }
+            }
+            if let Some(entity) = activate_opt {
+                self.tab_model.activate(entity);
+                self.rebuild_nav_model();
+                return Task::batch([save, self.update_title()]);
+            }
+            // A fresh "+" tab has no note yet; picking a note from the sidebar
+            // loads it into that tab instead of stacking another empty one.
+            if self.active_tab().is_some_and(|tab| tab.path.is_none()) {
+                let Some(note) = self.vault.notes().iter().find(|note| note.path() == path) else {
+                    return Task::batch([save, self.update_title()]);
+                };
+                let body = note.body().to_owned();
+                let title = note.title().to_owned();
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.path = Some(path.to_path_buf());
+                    tab.load_body(&body, &title);
+                }
+                let entity = self.tab_model.active();
+                self.tab_model.text_set(entity, title);
+                self.remember_last_tab(path);
+                self.rebuild_nav_model();
+                return Task::batch([
+                    save,
+                    Self::focus_block(0).map(cosmic::action::app),
+                    self.update_title(),
+                ]);
+            }
+        }
+        let Some(note) = self.vault.notes().iter().find(|note| note.path() == path) else {
+            return Task::batch([save, self.update_title()]);
+        };
         let body = note.body().to_owned();
         let title = note.title().to_owned();
-        self.load_body(&body, &title);
+        self.new_tab(path.to_path_buf(), &body, &title);
+        self.rebuild_nav_model();
+        Task::batch([
+            save,
+            Self::focus_block(0).map(cosmic::action::app),
+            self.update_title(),
+        ])
     }
 
-    /// Loads the given body and title into the editor.
-    fn load_body(&mut self, body: &str, title: &str) {
-        let mut blocks: Vec<EditableBlock> = editor::parse_markdown(body)
-            .into_iter()
-            .map(EditableBlock::from_block)
-            .collect();
-        // An empty note still gets one empty block so the editor has a
-        // focusable surface that shows the placeholder.
-        if blocks.is_empty() {
-            blocks.push(EditableBlock::from_block(editor::Block::paragraph("")));
+    /// Opens the sidebar note with the given id in a new tab.
+    fn open_sidebar_item_new_tab(&mut self, entity: nav_bar::Id) -> Task<cosmic::Action<Message>> {
+        let Some(NavEntry::Note(path)) = self.nav_model.data::<NavEntry>(entity).cloned() else {
+            return Task::none();
+        };
+        self.open_tab(&path, true)
+    }
+
+    /// Closes the tab with the given entity, saving its changes. When the
+    /// active tab is closed, the nearest neighbor (to the left, or the right
+    /// for the first tab) becomes active, like cosmic-edit.
+    fn close_tab(&mut self, entity: segmented_button::Entity) {
+        self.commit_title_rename();
+        let _ = self.save_active(false);
+        if self.tab_model.is_active(entity)
+            && let Some(position) = self.tab_model.position(entity)
+        {
+            if position > 0 {
+                self.tab_model.activate_position(position - 1);
+            } else {
+                self.tab_model.activate_position(position + 1);
+            }
         }
-        self.blocks = blocks;
-        self.selected_block = 0;
-        self.undo_stack.clear();
-        self.redo_stack.clear();
-        self.last_undo_at = None;
-        self.slash_menu = None;
-        title.clone_into(&mut self.title_draft);
-        self.dirty = false;
+        self.tab_model.remove(entity);
+        match self.active_tab().and_then(|tab| tab.path.clone()) {
+            Some(path) => self.remember_last_tab(&path),
+            None => self.remember_no_tabs(),
+        }
+        self.rebuild_nav_model();
     }
 
-    /// Empties the editor and clears the title.
-    fn clear_editor(&mut self) {
-        self.blocks.clear();
-        self.undo_stack.clear();
-        self.redo_stack.clear();
-        self.last_undo_at = None;
-        self.slash_menu = None;
-        self.title_draft.clear();
-        self.dirty = false;
+    /// Persists `path` (relative to the vault root) as the note to restore on
+    /// the next launch.
+    fn remember_last_tab(&mut self, path: &Path) {
+        let Some(handler) = self.config_handler.as_ref() else {
+            return;
+        };
+        let relative = path
+            .strip_prefix(self.vault.root())
+            .map(|relative| relative.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+        let _ = self.config.set_last_note(handler, Some(relative));
     }
 
-    /// Creates a new note and opens it in the editor.
+    /// Clears the persisted "last tab" when the last tab closes.
+    fn remember_no_tabs(&mut self) {
+        if let Some(handler) = &self.config_handler {
+            let _ = self.config.set_last_note(handler, None);
+        }
+    }
+
+    /// The settings panel: an empty column for now, matching the layout
+    /// cosmic-store gives its (also empty) settings page.
+    fn settings(&self) -> Element<'_, Message> {
+        widget::settings::view_column(vec![]).into()
+    }
+
+    /// Creates a new note and opens it in a new tab.
     fn new_note(&mut self) -> Task<cosmic::Action<Message>> {
         let save = self.save_active(false);
         match self.vault.create(&fl!("untitled")) {
             Ok(Some(note)) => {
                 let path = note.path().to_path_buf();
-                self.selected = Some(path);
-                self.load_note(&note);
+                let body = note.body().to_owned();
+                let title = note.title().to_owned();
+                self.new_tab(path, &body, &title);
+                self.rebuild_nav_model();
+                let focus =
+                    text_input::focus(cosmic::widget::Id::new(TITLE_ID)).map(cosmic::action::app);
+                Task::batch([
+                    save,
+                    focus,
+                    self.toast(fl!("note-created")),
+                    self.update_title(),
+                ])
+            }
+            Ok(None) => save,
+            Err(err) => {
+                eprintln!("failed to create note: {err}");
+                Task::batch([save, self.toast(fl!("save-error"))])
+            }
+        }
+    }
+
+    /// Creates a new note inside the folder with the given sidebar id and
+    /// opens it in a new tab, expanding the folder to reveal it.
+    fn new_note_in_folder(&mut self, entity: nav_bar::Id) -> Task<cosmic::Action<Message>> {
+        let Some(NavEntry::Folder(parent)) = self.nav_model.data::<NavEntry>(entity).cloned() else {
+            return Task::none();
+        };
+        let save = self.save_active(false);
+        match self.vault.create_in(&parent, &fl!("untitled")) {
+            Ok(Some(note)) => {
+                let path = note.path().to_path_buf();
+                let body = note.body().to_owned();
+                let title = note.title().to_owned();
+                self.expanded.insert(parent);
+                self.new_tab(path, &body, &title);
                 self.rebuild_nav_model();
                 let focus =
                     text_input::focus(cosmic::widget::Id::new(TITLE_ID)).map(cosmic::action::app);
@@ -1257,17 +1599,22 @@ impl AppModel {
 
     /// Saves the active note, optionally notifying the user.
     fn save_active(&mut self, notify: bool) -> Task<cosmic::Action<Message>> {
-        let Some(path) = self.selected.clone() else {
-            self.dirty = false;
+        let Some(tab) = self.active_tab() else {
             return Task::none();
         };
-        if !self.dirty {
+        if !tab.dirty {
             return Task::none();
         }
-        let body = self.editor_text();
+        let Some(path) = tab.path.clone() else {
+            // A blank tab has nothing to save yet.
+            return Task::none();
+        };
+        let body = Self::editor_text(tab);
         match self.vault.save(&path, &body) {
             Ok(Some(SaveOutcome::Saved)) => {
-                self.dirty = false;
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.dirty = false;
+                }
                 if notify {
                     self.toast(fl!("note-saved"))
                 } else {
@@ -1275,11 +1622,26 @@ impl AppModel {
                 }
             }
             Ok(Some(SaveOutcome::ConflictCopy { path: conflict })) => {
-                self.dirty = false;
-                if let Some(note) = self.vault.notes().iter().find(|note| note.path() == path) {
-                    let body = note.body().to_owned();
-                    let title = note.title().to_owned();
-                    self.load_body(&body, &title);
+                // The file on disk changed since it was loaded, so the vault
+                // wrote the local changes to a conflict copy; reload the tab
+                // from what the disk now has for the note.
+                let reload = {
+                    let tab_path = self.active_tab().and_then(|tab| tab.path.clone());
+                    match tab_path {
+                        Some(tab_path) => self
+                            .vault
+                            .notes()
+                            .iter()
+                            .find(|note| note.path() == tab_path)
+                            .map(|note| (note.body().to_owned(), note.title().to_owned())),
+                        None => None,
+                    }
+                };
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.dirty = false;
+                    if let Some((body, title)) = reload {
+                        tab.load_body(&body, &title);
+                    }
                 }
                 let name = conflict
                     .file_name()
@@ -1288,12 +1650,16 @@ impl AppModel {
                 self.toast(fl!("conflict-copy", name = name))
             }
             Ok(None) => {
-                self.dirty = false;
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.dirty = false;
+                }
                 Task::none()
             }
             Err(err) => {
                 eprintln!("failed to save note: {err}");
-                self.dirty = false;
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.dirty = false;
+                }
                 self.toast(fl!("save-error"))
             }
         }
@@ -1301,18 +1667,29 @@ impl AppModel {
 
     /// Commits the title draft as a rename, if it changed.
     fn commit_title_rename(&mut self) {
-        let Some(path) = self.selected.clone() else {
+        let Some((path, title_draft)) = self
+            .active_tab()
+            .and_then(|tab| tab.path.clone().map(|path| (path, tab.title_draft.clone())))
+        else {
             return;
         };
         let Some(note) = self.vault.notes().iter().find(|note| note.path() == path) else {
             return;
         };
-        if note.title() == self.title_draft {
+        if note.title() == title_draft {
             return;
         }
-        match self.vault.rename(&path, &self.title_draft) {
+        match self.vault.rename(&path, &title_draft) {
             Ok(Some(updated)) => {
-                updated.title().clone_into(&mut self.title_draft);
+                let entity = self.tab_model.active();
+                let new_path = updated.path().to_path_buf();
+                let new_title = updated.title().to_owned();
+                if let Some(tab) = self.tab_model.active_data_mut::<Tab>() {
+                    tab.path = Some(new_path);
+                    tab.title_draft = new_title.clone();
+                }
+                // Keep the tab button label in sync with the new title.
+                self.tab_model.text_set(entity, new_title);
                 self.rebuild_nav_model();
             }
             Ok(None) => {}
@@ -1322,15 +1699,17 @@ impl AppModel {
         }
     }
 
-    /// Rebuilds the native COSMIC navigation model from the vault tree.
+    /// Rebuilds the native COSMIC navigation model from the vault tree,
+    /// highlighting the active tab's note.
     fn rebuild_nav_model(&mut self) {
+        let selected = self.active_tab().and_then(|tab| tab.path.clone());
         let mut model = nav_bar::Model::default();
         Self::append_nav_nodes(
             &mut model,
             self.vault.tree(),
             self.vault.tree().root(),
             &self.expanded,
-            self.selected.as_deref(),
+            selected.as_deref(),
             0,
         );
         self.nav_model = model;
@@ -1475,8 +1854,8 @@ impl AppModel {
         text_input::focus(cosmic::widget::Id::new(DIALOG_NAME_ID)).map(cosmic::action::app)
     }
 
-    /// Deletes the note or folder with the given sidebar id, clearing the
-    /// editor if the open note was affected.
+    /// Deletes the note or folder with the given sidebar id, closing any tab
+    /// that edits the deleted note (or a note inside the deleted folder).
     fn delete_sidebar_item(&mut self, entity: nav_bar::Id) -> Task<cosmic::Action<Message>> {
         let Some(entry) = self.nav_model.data::<NavEntry>(entity).cloned() else {
             return Task::none();
@@ -1484,9 +1863,15 @@ impl AppModel {
         match entry {
             NavEntry::Note(path) => match self.vault.delete(&path) {
                 Ok(true) => {
-                    if self.selected.as_deref() == Some(path.as_path()) {
-                        self.selected = None;
-                        self.clear_editor();
+                    let entities: Vec<_> = self.tab_model.iter().collect();
+                    for entity in entities {
+                        if self
+                            .tab_model
+                            .data::<Tab>(entity)
+                            .is_some_and(|tab| tab.path.as_deref() == Some(path.as_path()))
+                        {
+                            self.close_tab(entity);
+                        }
                     }
                     self.rebuild_nav_model();
                     Task::batch([self.toast(fl!("note-deleted")), self.update_title()])
@@ -1501,11 +1886,17 @@ impl AppModel {
                 Ok(_) => {
                     self.expanded
                         .retain(|expanded| !expanded.starts_with(&path));
-                    if let Some(selected) = &self.selected
-                        && selected.starts_with(&path)
-                    {
-                        self.selected = None;
-                        self.clear_editor();
+                    let entities: Vec<_> = self.tab_model.iter().collect();
+                    for entity in entities {
+                        if self
+                            .tab_model
+                            .data::<Tab>(entity)
+                            .is_some_and(|tab| {
+                                tab.path.as_deref().is_some_and(|p| p.starts_with(&path))
+                            })
+                        {
+                            self.close_tab(entity);
+                        }
                     }
                     self.rebuild_nav_model();
                     Task::batch([self.toast(fl!("folder-deleted")), self.update_title()])
@@ -1558,40 +1949,56 @@ impl AppModel {
             .collect();
     }
 
-    /// Opens a note in the single editor pane.
-    fn open_note(&mut self, path: &Path) -> Task<cosmic::Action<Message>> {
-        self.commit_title_rename();
-        let save = self.save_active(false);
-        self.selected = Some(path.to_path_buf());
-        if let Some(note) = self.vault.notes().iter().find(|note| note.path() == path) {
-            let body = note.body().to_owned();
-            let title = note.title().to_owned();
-            self.load_body(&body, &title);
-            self.rebuild_nav_model();
-            Task::batch([
-                save,
-                Self::focus_block(0).map(cosmic::action::app),
-                self.update_title(),
-            ])
-        } else {
-            self.clear_editor();
-            Task::batch([save, self.update_title()])
-        }
+    /// The tab bar row: the open tabs plus a button that creates a new tab.
+    /// This is the cosmic-edit layout: a shrink-wrapped tab bar with a small
+    /// `+` button right next to it, above the editor content.
+    fn tab_bar(model: &segmented_button::SingleSelectModel) -> Element<'_, Message> {
+        widget::row::with_capacity(2)
+            .align_y(Alignment::Center)
+            .push(
+                widget::tab_bar::horizontal(model)
+                    .button_height(32)
+                    .button_spacing(cosmic::theme::spacing().space_xxs)
+                    .close_icon(icon::from_name("window-close-symbolic").size(16).icon())
+                    .on_activate(Message::TabActivate)
+                    .on_close(Message::TabClose)
+                    .width(Length::Shrink),
+            )
+            .push(
+                button::custom(icon::from_name("list-add-symbolic").size(16).icon())
+                    .on_press(Message::TabNew)
+                    .padding(cosmic::theme::spacing().space_xxs)
+                    .class(cosmic::theme::Button::Icon),
+            )
+            .into()
     }
 
-    /// The editor for the selected note.
+    /// The editor for the active tab: the tab bar, title input, toolbar, and
+    /// block editor. Shows the empty state when there are no tabs or when the
+    /// active tab is a fresh "+" tab with no note yet.
     fn editor_pane(&self) -> Element<'_, Message> {
-        if self.selected_note().is_none() {
+        let Some(tab) = self.active_tab() else {
             return Self::editor_empty_state();
+        };
+        // A blank tab has no note yet: keep the tab bar so it can be switched
+        // away from, and show the empty state below it.
+        if tab.path.is_none() {
+            return widget::column::with_capacity(2)
+                .push(Self::tab_bar(&self.tab_model))
+                .push(Self::editor_empty_state())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into();
         }
         let spacing = cosmic::theme::spacing();
-        let title_input = text_input::text_input(fl!("note-title-placeholder"), &self.title_draft)
+        let title_input = text_input::text_input(fl!("note-title-placeholder"), &tab.title_draft)
             .id(cosmic::widget::Id::new(TITLE_ID))
             .on_input(Message::EditTitle)
             .on_submit(|_| Message::RenameSubmit)
             .width(Length::Fill);
 
-        let mut column = widget::column::with_capacity(4)
+        let mut column = widget::column::with_capacity(5)
+            .push(Self::tab_bar(&self.tab_model))
             .push(widget::container(title_input).padding([spacing.space_s, spacing.space_s]))
             .push(divider::horizontal::default())
             .push(self.block_toolbar())
@@ -1604,8 +2011,8 @@ impl AppModel {
 
     /// A panel listing the notes that link to the active note, if any.
     fn backlinks_panel(&self) -> Option<Element<'_, Message>> {
-        let path = self.selected.as_ref()?;
-        let links = crate::backlinks::backlinks(&self.vault, path);
+        let path = self.active_tab().and_then(|tab| tab.path.clone())?;
+        let links = crate::backlinks::backlinks(&self.vault, &path);
         if links.is_empty() {
             return None;
         }
@@ -1635,17 +2042,21 @@ impl AppModel {
         )
     }
 
-    /// The block editor: a scrollable column of per-block text editors.
+    /// The block editor: a scrollable column of per-block text editors for
+    /// the active tab.
     fn block_editor(&self) -> Element<'_, Message> {
+        let Some(tab) = self.active_tab() else {
+            return widget::scrollable(widget::space()).height(Length::Fill).into();
+        };
         let spacing = cosmic::theme::spacing();
-        let mut column = widget::column::with_capacity(self.blocks.len());
-        for (index, block) in self.blocks.iter().enumerate() {
+        let mut column = widget::column::with_capacity(tab.blocks.len());
+        for (index, block) in tab.blocks.iter().enumerate() {
             column = column.push(Self::block_element(
                 index,
                 block,
-                &self.blocks,
-                self.slash_menu == Some(index),
-                self.slash_selection,
+                &tab.blocks,
+                tab.slash_menu == Some(index),
+                tab.slash_selection,
             ));
         }
         widget::scrollable(
@@ -1837,12 +2248,16 @@ impl AppModel {
         .into()
     }
 
-    /// The formatting toolbar for the selected block: block-style conversions
-    /// and inline markdown wrapping. The active style is highlighted.
+    /// The formatting toolbar for the active tab's selected block: block
+    /// style conversions and inline markdown wrapping. The active style is
+    /// highlighted.
     fn block_toolbar(&self) -> Element<'_, Message> {
+        let Some(tab) = self.active_tab() else {
+            return widget::container(widget::space()).into();
+        };
         let spacing = cosmic::theme::spacing();
-        let index = self.selected_block.min(self.blocks.len().saturating_sub(1));
-        let kind = self
+        let index = tab.selected_block.min(tab.blocks.len().saturating_sub(1));
+        let kind = tab
             .blocks
             .get(index)
             .map_or(&BlockKind::Paragraph, |block| &block.kind);
@@ -2406,10 +2821,10 @@ impl AppModel {
         )
     }
 
-    /// A snapshot of the whole document for undo/redo, rebuilt from the
+    /// A snapshot of a tab's whole document for undo/redo, rebuilt from its
     /// editable blocks as pure model blocks.
-    fn snapshot_blocks(&self) -> Vec<editor::Block> {
-        self.blocks.iter().map(EditableBlock::to_block).collect()
+    fn snapshot_tab(tab: &Tab) -> Vec<editor::Block> {
+        tab.blocks.iter().map(EditableBlock::to_block).collect()
     }
 
     /// Splits a multi-line paste into blocks (Futo behavior): the text
@@ -2418,7 +2833,7 @@ impl AppModel {
     /// a focus task when the paste was handled here, skipping the editor's
     /// default behavior. Code blocks and single-line pastes keep the default.
     fn intercept_paste(
-        &mut self,
+        tab: &mut Tab,
         index: usize,
         action: &text_editor::Action,
     ) -> Option<Task<cosmic::Action<Message>>> {
@@ -2428,7 +2843,7 @@ impl AppModel {
         if !text.contains('\n') {
             return None;
         }
-        let block = self.blocks.get(index)?;
+        let block = tab.blocks.get(index)?;
         if matches!(block.kind, BlockKind::Code(_) | BlockKind::Divider)
             || block.content.text().contains('\n')
         {
@@ -2451,15 +2866,15 @@ impl AppModel {
         let kind = block.kind.clone();
         let (replacement, caret_in_replacement) = paste_blocks(kind, &line, start, end, pasted);
         let caret = index + caret_in_replacement;
-        self.push_undo_step();
-        self.blocks.splice(index..=index, replacement);
-        renumber_blocks(&mut self.blocks);
-        self.selected_block = caret;
-        if let Some(block) = self.blocks.get_mut(caret) {
+        Self::push_undo_step(tab);
+        tab.blocks.splice(index..=index, replacement);
+        renumber_blocks(&mut tab.blocks);
+        tab.selected_block = caret;
+        if let Some(block) = tab.blocks.get_mut(caret) {
             let cursor = Self::end_cursor(&block.content);
             block.content.move_to(cursor);
         }
-        self.mark_dirty();
+        tab.dirty = true;
         Some(Self::focus_block(caret).map(cosmic::action::app))
     }
 
@@ -2472,86 +2887,86 @@ impl AppModel {
         })
     }
 
-    /// Pushes a snapshot of the current document and clears the redo stack.
-    fn record_snapshot(&mut self) {
-        self.undo_stack.push(self.snapshot_blocks());
-        if self.undo_stack.len() > UNDO_LIMIT {
-            self.undo_stack.remove(0);
+    /// Pushes a snapshot of the tab's current document and clears its redo
+    /// stack.
+    fn record_snapshot(tab: &mut Tab) {
+        tab.undo_stack.push(Self::snapshot_tab(tab));
+        if tab.undo_stack.len() > UNDO_LIMIT {
+            tab.undo_stack.remove(0);
         }
-        self.redo_stack.clear();
+        tab.redo_stack.clear();
     }
 
-    /// Records the current document as an undo step before an edit in the
-    /// given block, coalescing bursts of typing into a single step.
-    fn push_undo(&mut self, block_index: usize) {
+    /// Records the tab's current document as an undo step before an edit in
+    /// the given block, coalescing bursts of typing into a single step.
+    fn push_undo(tab: &mut Tab, block_index: usize) {
         let now = Instant::now();
-        if !Self::should_snapshot(self.last_undo_at, now, block_index) {
+        if !Self::should_snapshot(tab.last_undo_at, now, block_index) {
             return;
         }
-        self.record_snapshot();
-        self.last_undo_at = Some((now, block_index));
+        Self::record_snapshot(tab);
+        tab.last_undo_at = Some((now, block_index));
     }
 
-    /// Records the current document as its own undo step for a structural
-    /// change (split, convert, ...) and breaks the typing coalescing window
-    /// so the following keystrokes start a fresh step.
-    fn push_undo_step(&mut self) {
-        self.record_snapshot();
-        self.last_undo_at = None;
+    /// Records the tab's current document as its own undo step for a
+    /// structural change (split, convert, ...) and breaks the typing
+    /// coalescing window so the following keystrokes start a fresh step.
+    fn push_undo_step(tab: &mut Tab) {
+        Self::record_snapshot(tab);
+        tab.last_undo_at = None;
     }
 
-    /// Replaces the document with the given snapshot, places the caret at
-    /// the end of `selected_block` (clamped to the restored document), and
-    /// returns a task that refocuses the editor and refreshes the title.
-    fn restore_blocks(&mut self, snapshot: Vec<editor::Block>) -> Task<cosmic::Action<Message>> {
-        self.blocks = snapshot
+    /// Replaces the tab's document with the given snapshot, places the caret
+    /// at the end of `selected_block` (clamped to the restored document), and
+    /// returns a task that refocuses the editor. The caller refreshes the
+    /// title.
+    fn restore_blocks(tab: &mut Tab, snapshot: Vec<editor::Block>) -> Task<cosmic::Action<Message>> {
+        tab.blocks = snapshot
             .into_iter()
             .map(EditableBlock::from_block)
             .collect();
-        self.last_undo_at = None;
-        let index = self.selected_block.min(self.blocks.len().saturating_sub(1));
-        self.selected_block = index;
-        if let Some(block) = self.blocks.get_mut(index) {
+        tab.last_undo_at = None;
+        let index = tab.selected_block.min(tab.blocks.len().saturating_sub(1));
+        tab.selected_block = index;
+        if let Some(block) = tab.blocks.get_mut(index) {
             let cursor = Self::end_cursor(&block.content);
             block.content.move_to(cursor);
         }
-        self.mark_dirty();
-        Task::batch([
-            Self::focus_block(index).map(cosmic::action::app),
-            self.update_title(),
-        ])
+        tab.dirty = true;
+        Self::focus_block(index).map(cosmic::action::app)
     }
 
     /// Converts the block at `index` to `kind`, keeping its text (dividers
     /// drop it), and returns a task that moves focus back into the document:
     /// the converted block, or the next editable block after a divider
-    /// (inserting an empty paragraph when there is nowhere to type).
-    fn format_block(&mut self, index: usize, kind: BlockKind) -> Task<cosmic::Action<Message>> {
-        if self
+    /// (inserting an empty paragraph when there is nowhere to type). The
+    /// caller refreshes the title.
+    fn format_block(tab: &mut Tab, index: usize, kind: BlockKind) -> Task<cosmic::Action<Message>> {
+        if tab
             .blocks
             .get(index)
             .is_none_or(|block| block.kind == kind)
         {
             return Task::none();
         }
-        self.push_undo_step();
-        let Some(block) = self.blocks.get_mut(index) else {
+        Self::push_undo_step(tab);
+        let Some(block) = tab.blocks.get_mut(index) else {
             return Task::none();
         };
         let is_divider = matches!(kind, BlockKind::Divider);
         let text = block.content.text();
         block.kind = kind;
         block.content = text_editor::Content::with_text(if is_divider { "" } else { &text });
-        renumber_blocks(&mut self.blocks);
-        self.mark_dirty();
+        renumber_blocks(&mut tab.blocks);
+        tab.dirty = true;
         if !is_divider {
             return Self::focus_block(index).map(cosmic::action::app);
         }
-        if let Some(next) = Self::next_editable(&self.blocks, index) {
+        if let Some(next) = Self::next_editable(&tab.blocks, index) {
             return Self::focus_block(next).map(cosmic::action::app);
         }
         let next = index + 1;
-        self.blocks.insert(
+        tab.blocks.insert(
             next,
             EditableBlock::from_block(editor::Block::paragraph("")),
         );
@@ -2604,16 +3019,16 @@ impl AppModel {
         }
     }
 
-    /// Updates the header and window titles.
+    /// Updates the header and window titles from the active tab.
     pub fn update_title(&mut self) -> Task<cosmic::Action<Message>> {
         let mut window_title = fl!("app-title");
 
-        if let Some(note) = self.selected_note() {
+        if let Some(note) = self.active_note() {
             window_title.push_str(" — ");
             window_title.push_str(note.title());
         }
 
-        if self.dirty {
+        if self.active_tab().is_some_and(|tab| tab.dirty) {
             window_title = format!("● {window_title}");
         }
 
@@ -2644,6 +3059,8 @@ fn temp_vault_path() -> PathBuf {
 pub enum ContextPage {
     #[default]
     About,
+    /// The application settings, opened from the gear in the header bar.
+    Settings,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2673,10 +3090,14 @@ pub enum NavMenuAction {
     NewFolder,
     /// Create a folder inside the folder with the given sidebar id.
     NewFolderIn(nav_bar::Id),
+    /// Create a note inside the folder with the given sidebar id.
+    NewNoteIn(nav_bar::Id),
     /// Rename the folder with the given sidebar id.
     RenameFolder(nav_bar::Id),
     /// Delete the note or folder with the given sidebar id.
     DeleteItem(nav_bar::Id),
+    /// Open the note with the given sidebar id in a new tab.
+    OpenInNewTab(nav_bar::Id),
 }
 
 impl menu::action::MenuAction for NavMenuAction {

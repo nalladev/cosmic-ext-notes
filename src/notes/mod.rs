@@ -226,8 +226,9 @@ impl Vault {
         &self.root
     }
 
-    /// Creates a new note with the given title. The title is sanitized and made
-    /// unique (e.g. `Untitled 2.md` if `Untitled.md` already exists).
+    /// Creates a new note with the given title at the vault root. The title is
+    /// sanitized and made unique (e.g. `Untitled 2.md` if `Untitled.md` already
+    /// exists).
     ///
     /// Returns `None` if the title is not usable.
     ///
@@ -235,10 +236,24 @@ impl Vault {
     ///
     /// Returns an error if the note file cannot be written.
     pub fn create(&mut self, title: &str) -> io::Result<Option<Note>> {
+        let root = self.root.clone();
+        self.create_in(&root, title)
+    }
+
+    /// Creates a new note with the given title inside `parent`. The title is
+    /// sanitized and made unique (e.g. `Untitled 2.md` if `Untitled.md` already
+    /// exists in the folder).
+    ///
+    /// Returns `None` if the title is not usable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the note file cannot be written.
+    pub fn create_in(&mut self, parent: &Path, title: &str) -> io::Result<Option<Note>> {
         let Some(stem) = sanitize_title(title) else {
             return Ok(None);
         };
-        let path = unique_path(&self.root, &stem);
+        let path = unique_path(parent, &stem);
         let mut frontmatter = Frontmatter::new();
         frontmatter.set_pinned(false);
         frontmatter.set_created(now_rfc3339());
@@ -589,6 +604,9 @@ pub enum TreeNode {
         name: String,
         /// The absolute path of the file.
         path: PathBuf,
+        /// The last modification time of the file, used to order notes with
+        /// the most recently updated at the top.
+        modified: SystemTime,
     },
 }
 
@@ -667,6 +685,7 @@ fn build_tree(root: &Path) -> io::Result<Tree> {
         } else if is_markdown(&path) {
             tree.root.push(TreeNode::File {
                 name: file_stem(&path),
+                modified: modified_time(&path),
                 path,
             });
         }
@@ -696,6 +715,7 @@ fn scan_children(dir: &Path, tree: &mut Tree) -> io::Result<Vec<TreeNode>> {
         } else if is_markdown(&path) {
             nodes.push(TreeNode::File {
                 name: file_stem(&path),
+                modified: modified_time(&path),
                 path,
             });
         }
@@ -704,12 +724,30 @@ fn scan_children(dir: &Path, tree: &mut Tree) -> io::Result<Vec<TreeNode>> {
     Ok(nodes)
 }
 
-/// Orders tree nodes: directories before files, then by name (case-insensitive).
+/// The last modification time of a file, defaulting to the epoch when the
+/// metadata cannot be read.
+fn modified_time(path: &Path) -> SystemTime {
+    fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .unwrap_or(UNIX_EPOCH)
+}
+
+/// Orders tree nodes: directories before files (folders by name), then files
+/// by modification time descending so the most recently updated note is at the
+/// top, falling back to name (case-insensitive) when times tie.
 fn sort_nodes(a: &TreeNode, b: &TreeNode) -> Ordering {
-    a.is_folder()
-        .cmp(&b.is_folder())
-        .reverse()
-        .then_with(|| a.name().to_lowercase().cmp(&b.name().to_lowercase()))
+    match (a.is_folder(), b.is_folder()) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (true, true) => a.name().to_lowercase().cmp(&b.name().to_lowercase()),
+        (false, false) => match (a, b) {
+            (TreeNode::File { modified: am, .. }, TreeNode::File { modified: bm, .. }) => {
+                bm.cmp(am)
+                    .then_with(|| a.name().to_lowercase().cmp(&b.name().to_lowercase()))
+            }
+            _ => Ordering::Equal,
+        },
+    }
 }
 
 /// The file name of a path, as a string.
@@ -1466,15 +1504,29 @@ mod tests {
     }
 
     #[test]
-    fn tree_sorts_folders_before_files_by_name() {
+    fn tree_sorts_folders_before_files_then_by_mtime() {
         let dir = temp_dir();
         fs::create_dir(dir.join("Zeta")).expect("mkdir");
         fs::write(dir.join("alpha.md"), "a").expect("write");
         fs::write(dir.join("Beta.md"), "b").expect("write");
 
+        // Give the files explicit, distinct modification times so the mtime
+        // ordering is deterministic regardless of how fast the writes happen.
+        let set_mtime = |name: &str, secs: u64| {
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .open(dir.join(name))
+                .expect("open");
+            file.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(secs))
+                .expect("set mtime");
+        };
+        set_mtime("alpha.md", 100);
+        set_mtime("Beta.md", 200);
+
         let vault = Vault::open(&dir).expect("open");
         let root: Vec<&str> = vault.tree().root().iter().map(TreeNode::name).collect();
-        // Folder first despite sorting after "alpha" alphabetically.
-        assert_eq!(root, vec!["Zeta", "alpha", "Beta"]);
+        // Folder first despite sorting after "alpha" alphabetically; the most
+        // recently updated file (Beta) comes before the older one (alpha).
+        assert_eq!(root, vec!["Zeta", "Beta", "alpha"]);
     }
 }

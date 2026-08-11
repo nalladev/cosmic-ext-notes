@@ -73,3 +73,6 @@ strikethrough = Strikethrough
 indent = Increase indentation
 outdent = Decrease indentation
 backlinks = Backlinks
+settings = Settings
+new-tab = New Tab
+open-in-new-tab = Open in New Tab
