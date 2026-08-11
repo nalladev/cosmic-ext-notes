@@ -41,6 +41,7 @@ pub struct Note {
     body: String,
 }
 
+#[allow(dead_code)] // Kept for persistence and future note-list views.
 impl Note {
     /// Absolute path of the backing file.
     #[must_use]
@@ -170,6 +171,7 @@ pub struct Vault {
     /// The root directory that holds the notes.
     root: PathBuf,
     /// The trash directory inside the vault.
+    #[allow(dead_code)] // Kept for the retained trash-management API.
     trash: PathBuf,
     /// All notes (including trashed ones), sorted: pinned first, then by
     /// modification time descending, then by title.
@@ -178,6 +180,7 @@ pub struct Vault {
     tree: Tree,
 }
 
+#[allow(dead_code)] // The simplified UI does not currently expose every vault operation.
 impl Vault {
     /// Opens (creating if necessary) the vault at the given directory and
     /// scans it for notes.
@@ -215,6 +218,12 @@ impl Vault {
     #[must_use]
     pub fn notes(&self) -> &[Note] {
         &self.notes
+    }
+
+    /// The root directory that holds the notes.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     /// Creates a new note with the given title. The title is sanitized and made
@@ -425,6 +434,74 @@ impl Vault {
         Ok(true)
     }
 
+    /// Creates a new folder with the given name inside `parent`. The name is
+    /// sanitized and made unique (e.g. `Ideas 2` if `Ideas` already exists).
+    ///
+    /// Returns `None` if the name is not usable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be created.
+    pub fn create_folder(&mut self, parent: &Path, name: &str) -> io::Result<Option<PathBuf>> {
+        let Some(stem) = sanitize_title(name) else {
+            return Ok(None);
+        };
+        let path = unique_dir_path(parent, &stem);
+        fs::create_dir(&path)?;
+        self.rebuild_tree();
+        Ok(Some(path))
+    }
+
+    /// Renames the folder at `path` to `new_name`, moving it to a sanitized,
+    /// unique name in the same parent. The paths of every note inside the
+    /// folder are updated in place.
+    ///
+    /// Returns the new path, or `None` if the new name is not usable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be moved.
+    pub fn rename_folder(&mut self, path: &Path, new_name: &str) -> io::Result<Option<PathBuf>> {
+        let Some(stem) = sanitize_title(new_name) else {
+            return Ok(None);
+        };
+        let Some(parent) = path.parent() else {
+            return Ok(None);
+        };
+        let new_path = unique_dir_path(parent, &stem);
+        if new_path == path {
+            return Ok(Some(new_path));
+        }
+        fs::rename(path, &new_path)?;
+        // The notes inside the folder move with it.
+        for note in &mut self.notes {
+            if note.path.starts_with(path) {
+                note.path = new_path.join(
+                    note.path
+                        .strip_prefix(path)
+                        .expect("path was checked with starts_with"),
+                );
+            }
+        }
+        self.rebuild_tree();
+        Ok(Some(new_path))
+    }
+
+    /// Permanently deletes the folder at `path` and everything inside it,
+    /// removing all affected notes from the vault. Returns the number of notes
+    /// that were removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be removed.
+    pub fn delete_folder(&mut self, path: &Path) -> io::Result<usize> {
+        fs::remove_dir_all(path)?;
+        let before = self.notes.len();
+        self.notes.retain(|note| !note.path.starts_with(path));
+        self.rebuild_tree();
+        Ok(before - self.notes.len())
+    }
+
     /// Permanently deletes every trashed note. Returns the number of deleted
     /// notes.
     ///
@@ -451,18 +528,24 @@ impl Vault {
         Ok(deleted)
     }
 
-    /// Scans a directory for markdown files and appends them as notes.
+    /// Scans a directory recursively for markdown files and appends them as
+    /// notes. Hidden entries (which includes the trash directory) are skipped,
+    /// mirroring the rules of [`build_tree`].
     fn scan_dir(dir: &Path, notes: &mut Vec<Note>) -> io::Result<()> {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
-            if !path.is_file() || !is_markdown(&path) || is_hidden(&path) {
+            if is_hidden(&path) {
                 continue;
             }
-            let Ok(text) = fs::read_to_string(&path) else {
-                continue;
-            };
-            notes.push(Note::from_text(path, text));
+            if path.is_dir() {
+                Self::scan_dir(&path, notes)?;
+            } else if is_markdown(&path) {
+                let Ok(text) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                notes.push(Note::from_text(path, text));
+            }
         }
         Ok(())
     }
@@ -784,6 +867,18 @@ fn unique_path(dir: &Path, stem: &str) -> PathBuf {
     candidate
 }
 
+/// Returns a directory path in `dir` with the given name that does not exist
+/// yet, by appending ` 2`, ` 3`, … when necessary.
+fn unique_dir_path(dir: &Path, name: &str) -> PathBuf {
+    let mut candidate = dir.join(name);
+    let mut n = 2;
+    while candidate.exists() {
+        candidate = dir.join(format!("{name} {n}"));
+        n += 1;
+    }
+    candidate
+}
+
 /// Returns a path for a conflict copy of the note at `path`.
 fn conflict_path(path: &Path) -> PathBuf {
     let stem = path.file_stem().map_or_else(
@@ -804,6 +899,7 @@ fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
 }
 
 /// Restores the modification time of a file.
+#[allow(dead_code)] // Used by the retained preview-preference API.
 fn set_modified_time(path: &Path, time: SystemTime) -> io::Result<()> {
     let file = fs::File::options().write(true).open(path)?;
     file.set_times(fs::FileTimes::new().set_modified(time))?;
@@ -963,6 +1059,79 @@ mod tests {
         assert_eq!(reopened.notes().len(), 1);
         assert_eq!(reopened.notes()[0].title(), "Shopping");
         assert_eq!(reopened.notes()[0].snippet(), "");
+    }
+
+    #[test]
+    fn folder_create_rename_and_delete() {
+        let dir = temp_dir();
+        let mut vault = Vault::open(&dir).expect("open");
+        let root = vault.root().to_path_buf();
+
+        // Creating a folder makes it unique and visible in the tree.
+        let folder = vault
+            .create_folder(&root, "Ideas")
+            .expect("create")
+            .expect("name");
+        assert!(folder.is_dir());
+        let duplicate = vault
+            .create_folder(&root, "Ideas")
+            .expect("create")
+            .expect("name");
+        assert_eq!(duplicate, root.join("Ideas 2"));
+        assert!(vault.tree().root().iter().any(|node| node.path() == folder));
+
+        // A note inside the folder is scanned on reopen.
+        let note_path = folder.join("Draft.md");
+        fs::write(
+            &note_path,
+            "---\npinned: false\ncreated: 2026-01-01T00:00:00Z\n---\nBody\n",
+        )
+        .expect("write");
+        let reopened = Vault::open(&dir).expect("reopen");
+        assert!(reopened.notes().iter().any(|note| note.path() == note_path));
+
+        // Renaming the folder moves the note with it.
+        let mut vault = Vault::open(&dir).expect("reopen");
+        let renamed = vault
+            .rename_folder(&folder, "Work")
+            .expect("rename")
+            .expect("name");
+        assert_eq!(renamed, folder.with_file_name("Work"));
+        assert!(renamed.is_dir());
+        assert!(!folder.exists());
+        assert!(renamed.join("Draft.md").is_file());
+        assert!(
+            vault
+                .notes()
+                .iter()
+                .any(|note| note.path() == renamed.join("Draft.md"))
+        );
+
+        // Deleting the folder removes the note too.
+        let deleted = vault.delete_folder(&renamed).expect("delete");
+        assert_eq!(deleted, 1);
+        assert!(!renamed.exists());
+        assert!(
+            !vault
+                .notes()
+                .iter()
+                .any(|note| note.path().starts_with(&renamed))
+        );
+        // The duplicate created earlier in the test remains.
+        assert!(
+            vault
+                .tree()
+                .root()
+                .iter()
+                .any(|node| node.path() == duplicate)
+        );
+        assert!(
+            vault
+                .tree()
+                .root()
+                .iter()
+                .all(|node| node.path() != renamed)
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@ mod config;
 mod editor;
 mod i18n;
 mod notes;
-mod sidebar;
+mod sidebar_area;
 
 fn main() -> cosmic::iced::Result {
     // Get the system's preferred languages.

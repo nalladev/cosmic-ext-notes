@@ -4,6 +4,7 @@ repository = Repository
 file = File
 view = View
 new-note = New Note
+new-folder = New Folder
 save = Save
 search = Search
 all-notes = All Notes
@@ -43,6 +44,17 @@ delete-note-title = Delete note?
 delete-note-body = "{$name}" will be permanently deleted. This cannot be undone.
 empty-trash-title = Empty Trash?
 empty-trash-body = All trashed notes will be permanently deleted. This cannot be undone.
+
+folder-name = Folder name
+rename-folder = Rename Folder
+delete-folder = Delete Folder
+name-invalid = "{$name}" is not a valid name
+name-no-slashes = Names cannot contain slashes
+folder-already-exists = A folder with this name already exists
+name-hidden = Names cannot start with a period
+folder-created = Folder created
+folder-renamed = Folder renamed
+folder-deleted = Folder deleted
 
 paragraph = Paragraph
 heading-1 = Heading 1

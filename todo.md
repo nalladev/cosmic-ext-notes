@@ -1,49 +1,12 @@
 # Todo
+complete first task, check just lint. ask user for approoval. user approves, remove the task from todo, move on to the next and so on.
 
-Working mode: I (the agent) read this file, plan, implement, verify (`just lint` + tests + smoke), and move finished items to *Completed*. Drop issues/requests here anytime — I'll work through them, using parallel sub-agents where tasks touch disjoint files. create new tasks to become like futo notes. while being a cosmic app vibe. check the custome markdown editor component and its competness withfuto notes editor. add improvable features as todo. no need to go beyond featu8res in futo notes. futo notes repo is cloned in this workspace to copy implentation from. and iterate. multiple agents are working parrallely so be cooperative. commit changes. keep just lint clean always. to run.
-
-ignore the sync part everything else copy implementation from futo notes
-
-*In Progress*
-
-## Item 1 — Sidebar with collapsible directory tree + tabs (Futo-style layout)
-
-Original request: like cosmic-player shows opened folder contents in the side panel — show notes as files/folders inside the cosmic-notes folder in a collapsible directory-tree sidebar. One sidebar on the left, growing editor/viewing panel on the right like Futo Notes. Right panel supports tabs for multiple open notes (pattern from cosmic-terminal / cosmic-files).
-
-- [x] 1.1 `src/notes/mod.rs`: add `Tree`/`TreeNode` model — recursive vault scan, folders-before-files, hidden/non-markdown excluded (same rules as `notes()`), rebuilt on vault mutations, unit tests
-- [x] 1.2 `src/sidebar.rs` (new): collapsible tree widget — chevron icons (`go-next`/`go-down`), indent by depth, click file → open note, click folder → toggle, selected highlight. Clean-room port of the cosmic-player *behavior* (GPL — imitate, don't copy); libcosmic MPL widgets only
-- [x] 1.3 Tabs: multiple open notes via libcosmic `tab_bar` (`segmented_button::Model`, closable, per-tab `data = PathBuf`). Switching tabs saves + reloads (per-tab editor state later)
-- [x] 1.4 Layout + state in `src/app.rs`: sidebar | divider | (tab bar + editor pane). Keep search + All/Pinned/Trash (segmented control in the sidebar); pinned shown with star; Trash as a collapsible section at the bottom. New messages: ToggleFolder / OpenNote / CloseTab / ActivateTab
-- [x] 1.5 i18n keys in `i18n/en/cosmic_notes.ftl`
-- [x] 1.6 Verify: `just lint`, `cargo test --all-features`, headless smoke; commit + push on `block-editor`
-
-*Backlog* (not yet scheduled)
-- [ ] Editor: drag-reorder block handles (`reorderable_flex_row` + `dnd_source`/`dnd_destination`)
-- [x] Editor: space on `[ ]`/`[x]` marker toggles todo (done by parallel agent — working tree, uncommitted)
-- [ ] Editor: multi-block select/operate (Shift+arrows, cut/copy/delete)
-- [x] Editor: `[[backlinks]]` across the vault — core module (`src/backlinks.rs`) + UI panel under the editor, click → `SelectNote(to)`
-- [ ] Editor: images/attachments
-- [ ] Tabs: per-tab editor state (blocks + undo/redo per open note, no save/reload on switch)
-
-*Editor completeness audit* (parallel agent, 2026-08-10 — gaps vs Futo/Notion/Obsidian; unscheduled)
-- [ ] Editor: find & replace in the active note (Ctrl+F panel: match across blocks, Enter next/prev, replace one/all)
-- [ ] Editor: table block kind (GFM pipe tables: parse/serialize + in-editor grid, Tab moves cells)
-- [ ] Editor: callout block kind (`> [!NOTE]`-style: icon + tinted background, collapsible)
-- [ ] Editor: `[[` wiki-link autocomplete (picker of vault note titles, inserts `[[title]]`; pairs with backlinks item)
-- [ ] Editor: code-block language tag → click to switch language; per-language highlighting via `text_editor::highlight`
-- [ ] Editor: auto-pair `"` `'` `(` `[` `` ` `` while typing (unless a selection or following char makes it awkward)
-- [ ] Editor: slash menu filters as you type (fuzzy match over the 10 entries, ↑/↓/Enter/Esc unchanged)
-- [ ] Editor: duplicate block (Ctrl+D — inserts a copy of the block below, with undo)
-- [ ] Editor: word/char count in a status bar (updates on edit, i18n keys)
-- [ ] Editor: outline — collapsible heading list to jump to sections (Futo-style, lives in the sidebar)
-
-*Pending*
-- (new requests land here)
-
-*Completed*
-- [x] Block editor stages 0–4: typed-markdown conversion, Enter split/continue/exit, Backspace merge/un-nest, Tab indent, checkbox toggles, cross-block caret, toolbar + inline markers
-- [x] Document-wide undo/redo (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, 800 ms coalescing, 100-step cap)
-- [x] Multi-line paste splits into blocks (markdown-aware: paste a list → list blocks)
-- [x] Ordered-list renumbering on structural changes
-- [x] Slash-command menu (`/` in empty paragraph; ↑/↓/Enter/Esc; 10 block kinds)
-- [x] Sidebar with collapsible directory tree + tabs (Item 1)
+## Pending
+ 1. like cosmic-store has we need a settings gear icon on the right end of the title bar. remove the + button for new note from there. the settings button shall open a setttings panel from the right exactly like cosmic-store does. we haev to copy the whole thing. for now inside the settings panel we dont need any setting.
+ 3. the cosmic-editor has done a good job in tabs. that is the exact kind of tab ui we need. the editor section our app needs to copy the exact type tab ui from the cosmic-editor. i choose form that app because . in that the tabs dont take up full width. and also shows a + button for new tab right next to the tab list.
+ 4. we need a new context menu option for notes in side panel. open in new tab.
+ 5. we need to remember the last opened tab in the editor section. so when the app is reopened, the last tab is restored.
+ 6. in the side panel the notes and folders are there . the desired order for notes is like last updated file at the top. but folders shall always stay uptop of others.
+ 7. fix diagnostics
+ 8. commit everything in git diff/status
+ 9. 
