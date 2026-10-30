@@ -16,16 +16,22 @@ use cosmic::{
 };
 use std::time::Duration;
 
-type Decorations = Vec<(usize, bool, bool, bool)>;
+type Decorations = Vec<(usize, bool, bool, bool, bool)>;
 
 type Paragraph = <Renderer as text::Renderer>::Paragraph;
 
 pub(super) struct VisualEditor<'a> {
     editor: &'a Editor,
+    link_color: Color,
+    accent_revision: u64,
 }
 impl<'a> VisualEditor<'a> {
-    pub fn new(editor: &'a Editor) -> Self {
-        Self { editor }
+    pub fn new(editor: &'a Editor, link_color: Color, accent_revision: u64) -> Self {
+        Self {
+            editor,
+            link_color,
+            accent_revision,
+        }
     }
 }
 
@@ -39,14 +45,14 @@ struct LaidCell {
     shaded: bool,
     table: bool,
     size: f32,
-    decorations: Vec<(usize, bool, bool, bool)>,
+    decorations: Decorations,
     image: Option<(image::Handle, Rectangle)>,
 }
 #[derive(Default)]
 struct State {
     cells: Vec<LaidCell>,
     owner: Option<EditorOwner>,
-    cache: Option<(EditorOwner, u64, usize, usize, u32)>,
+    cache: Option<(EditorOwner, u64, usize, usize, u32, u64)>,
     focused: bool,
     window_focused: bool,
     dragging: bool,
@@ -171,6 +177,8 @@ impl Widget<Message, Theme, Renderer> for VisualEditor<'_> {
             tree.state.downcast_mut::<State>(),
             renderer.default_font(),
             limits,
+            self.link_color,
+            self.accent_revision,
         )
     }
     fn draw(
@@ -286,7 +294,7 @@ impl Widget<Message, Theme, Renderer> for VisualEditor<'_> {
                 }
                 // Native spans carry fonts, sizes and colors. Decorations use the
                 // exact native span bounds rather than estimated character widths.
-                for (index, underline, strike, highlight) in &cell.decorations {
+                for (index, underline, strike, highlight, link) in &cell.decorations {
                     for rectangle in cell.paragraph.span_bounds(*index) {
                         let bounds = rectangle + Vector::new(position.x, position.y);
                         if *highlight {
@@ -313,7 +321,12 @@ impl Widget<Message, Theme, Renderer> for VisualEditor<'_> {
                                     ),
                                     ..renderer::Quad::default()
                                 },
-                                defaults.text_color.scale_alpha(0.7),
+                                if *link {
+                                    self.link_color
+                                } else {
+                                    defaults.text_color
+                                }
+                                .scale_alpha(0.7),
                             );
                         }
                     }
@@ -383,6 +396,7 @@ fn spans<'a>(
     editor: &'a Editor,
     cell: &projection::Cell,
     base_font: Font,
+    link_color: Color,
 ) -> (Vec<text::Span<'a>>, Decorations) {
     let range = &cell.display;
     let mut boundaries = vec![range.start, range.end];
@@ -428,14 +442,16 @@ fn spans<'a>(
         };
         let mut span = text::Span::new(&editor.surface.projection.text[start..end]).font(font);
         if link {
-            span.color = Some(Color::from_rgb(0.22, 0.52, 0.88));
+            span.color = Some(link_color);
         }
-        if let Some(color) = style.color {
-            span.color = Some(Color::from_rgb8(
-                (color >> 16) as u8,
-                (color >> 8) as u8,
-                color as u8,
-            ));
+        if !link {
+            if let Some(color) = style.color {
+                span.color = Some(Color::from_rgb8(
+                    (color >> 16) as u8,
+                    (color >> 8) as u8,
+                    color as u8,
+                ));
+            }
         }
         if style.superscript || style.subscript {
             span.size = Some(Pixels(cell.presentation.size * 0.8));
@@ -445,6 +461,7 @@ fn spans<'a>(
             style.underline || link,
             style.strikethrough,
             style.highlight || style.code,
+            link,
         ));
         spans.push(span);
     }
@@ -459,6 +476,8 @@ fn layout_surface(
     state: &mut State,
     base_font: Font,
     limits: &layout::Limits,
+    link_color: Color,
+    accent_revision: u64,
 ) -> layout::Node {
     state.bind(editor);
     let width = limits.max().width.max(80.0);
@@ -468,6 +487,7 @@ fn layout_surface(
         editor.surface_revision,
         editor.image_revision,
         width.to_bits(),
+        accent_revision,
     );
     if state
         .ime_session
@@ -481,7 +501,7 @@ fn layout_surface(
     }
     if state.cache.as_ref() != Some(&key) {
         state.cells.clear();
-        let mut y = 18.0;
+        let mut y = 14.0;
         for row in &editor.surface.rows {
             let count = row.cells.len().max(1);
             let column_width = (width - 48.0) / count as f32;
@@ -512,7 +532,7 @@ fn layout_surface(
                         },
                 );
                 let available = (column_width - inset - 12.0).max(20.0);
-                let (spans, decorations) = spans(editor, cell, base_font);
+                let (spans, decorations) = spans(editor, cell, base_font, link_color);
                 let paragraph = Paragraph::with_spans(text::Text {
                     content: &spans,
                     bounds: Size::new(available, f32::INFINITY),
@@ -976,6 +996,8 @@ impl Harness {
             &mut self.state,
             Font::default(),
             &layout::Limits::new(Size::ZERO, self.size),
+            Color::from_rgb(0.22, 0.52, 0.88),
+            0,
         )
     }
     pub fn event(&mut self, editor: &mut Editor, event: Event, pointer: Option<Point>) {

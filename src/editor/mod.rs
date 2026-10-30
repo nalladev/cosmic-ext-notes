@@ -176,8 +176,12 @@ impl Editor {
         Some(cosmic::iced::core::image::Handle::from_path(path))
     }
 
-    pub fn view(&self) -> cosmic::Element<'_, Message> {
-        widget::VisualEditor::new(self).into()
+    pub fn view(
+        &self,
+        link_color: cosmic::iced::Color,
+        accent_revision: u64,
+    ) -> cosmic::Element<'_, Message> {
+        widget::VisualEditor::new(self, link_color, accent_revision).into()
     }
 
     pub fn undo(&mut self) {

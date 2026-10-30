@@ -773,10 +773,9 @@ fn sort_nodes(a: &TreeNode, b: &TreeNode) -> Ordering {
         (false, true) => Ordering::Greater,
         (true, true) => a.name().to_lowercase().cmp(&b.name().to_lowercase()),
         (false, false) => match (a, b) {
-            (TreeNode::File { modified: am, .. }, TreeNode::File { modified: bm, .. }) => {
-                bm.cmp(am)
-                    .then_with(|| a.name().to_lowercase().cmp(&b.name().to_lowercase()))
-            }
+            (TreeNode::File { modified: am, .. }, TreeNode::File { modified: bm, .. }) => bm
+                .cmp(am)
+                .then_with(|| a.name().to_lowercase().cmp(&b.name().to_lowercase())),
             _ => Ordering::Equal,
         },
     }

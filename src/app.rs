@@ -62,6 +62,10 @@ pub struct AppModel {
     config_handler: Option<cosmic_config::Config>,
     /// Toast notifications.
     toasts: Toasts<Message>,
+    /// The active COSMIC accent used when shaping Markdown link spans.
+    editor_link_color: cosmic::iced::Color,
+    /// Changes whenever the link color changes, invalidating editor paragraphs.
+    editor_accent_revision: u64,
     /// The open sidebar folder dialog (create or rename), if any.
     sidebar_dialog: Option<SidebarDialog>,
     /// Where the sidebar's empty-area context menu is open, if any.
@@ -252,6 +256,19 @@ impl cosmic::Application for AppModel {
 
     fn core_mut(&mut self) -> &mut cosmic::Core {
         &mut self.core
+    }
+
+    fn system_theme_update(
+        &mut self,
+        _keys: &[&'static str],
+        new_theme: &cosmic::cosmic_theme::Theme,
+    ) -> Task<cosmic::Action<Self::Message>> {
+        let link_color = cosmic::iced::Color::from(*new_theme.accent_color());
+        if self.editor_link_color != link_color {
+            self.editor_link_color = link_color;
+            self.editor_accent_revision = self.editor_accent_revision.wrapping_add(1);
+        }
+        Task::none()
     }
 
     /// Supplies the standard COSMIC sidebar affordance in the header bar.
@@ -475,6 +492,8 @@ impl cosmic::Application for AppModel {
 
         let vault = Self::open_vault(&config);
 
+        let editor_link_color =
+            cosmic::iced::Color::from(*core.system_theme().cosmic().accent_color());
         let mut app = AppModel {
             core,
             context_page: ContextPage::default(),
@@ -487,6 +506,8 @@ impl cosmic::Application for AppModel {
             vault,
             tab_model: segmented_button::SingleSelectModel::default(),
             toasts: Toasts::new(Message::ToastClosed),
+            editor_link_color,
+            editor_accent_revision: 0,
             sidebar_dialog: None,
             sidebar_context_menu_point: None,
         };
@@ -1737,7 +1758,10 @@ impl AppModel {
 
     fn block_editor(&self) -> Element<'_, Message> {
         match self.active_tab() {
-            Some(tab) => tab.editor.view().map(Message::Editor),
+            Some(tab) => tab
+                .editor
+                .view(self.editor_link_color, self.editor_accent_revision)
+                .map(Message::Editor),
             None => widget::space().into(),
         }
     }
