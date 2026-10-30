@@ -776,7 +776,6 @@ impl cosmic::Application for AppModel {
                 Task::none()
             }
 
-
             Message::RemoveTag(tag) => {
                 if let Some(tab) = self.active_tab_mut() {
                     tab.tags.retain(|existing| existing != &tag);
@@ -1193,12 +1192,12 @@ impl AppModel {
                             .iter()
                             .find(|note| note.path() == tab_path)
                             .map(|note| {
-                                                            (
-                                                                note.body().to_owned(),
-                                                                note.title().to_owned(),
-                                                                note.tags().to_vec(),
-                                                            )
-                                                        }),
+                                (
+                                    note.body().to_owned(),
+                                    note.title().to_owned(),
+                                    note.tags().to_vec(),
+                                )
+                            }),
                         None => None,
                     }
                 };
@@ -1236,7 +1235,10 @@ impl AppModel {
         };
         let tag = tab.tag_draft.trim().trim_start_matches('#').trim();
         if !tag.is_empty()
-            && !tab.tags.iter().any(|existing| existing.eq_ignore_ascii_case(tag))
+            && !tab
+                .tags
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(tag))
         {
             tab.tags.push(tag.to_owned());
             tab.tags.sort_unstable_by_key(|value| value.to_lowercase());
@@ -1555,7 +1557,7 @@ impl AppModel {
     const EDITOR_MAX_WIDTH: f32 = 718.0;
 
     /// Space between the tab bar and the note content.
-    const EDITOR_TOP_PADDING: f32 = 24.0;
+    const EDITOR_TOP_PADDING: f32 = 16.0;
 
     /// The editor for the active tab: the tab bar, title input, toolbar, and
     /// block editor. Shows the empty state when there are no tabs or when the
@@ -1580,8 +1582,12 @@ impl AppModel {
             .on_input(Message::EditTitle)
             .on_submit(|_| Message::RenameSubmit)
             .style(cosmic::theme::TextInput::EditableText)
-            .size(26)
-            .padding([4, 0])
+            .size(27)
+            .font(cosmic::iced::Font {
+                weight: cosmic::iced::font::Weight::Semibold,
+                ..Default::default()
+            })
+            .padding([2, 0])
             .width(Length::Fill);
 
         let mut content = widget::column::with_capacity(3)
@@ -1595,7 +1601,7 @@ impl AppModel {
             .push(
                 widget::container(self.block_editor())
                     .width(Length::Fill)
-                    .padding([spacing.space_s, 36, 0, 36]),
+                    .padding([spacing.space_xxs, 44, 0, 44]),
             );
         if let Some(panel) = self.backlinks_panel() {
             content = content.push(divider::horizontal::default()).push(panel);
@@ -1695,13 +1701,36 @@ impl AppModel {
             );
         } else {
             row = row.push(
-                button::text("+ Tag")
-                    .on_press(Message::AddTag)
-                    .class(cosmic::theme::Button::Text),
+                widget::container(
+                    button::custom(widget::text::caption("+ Tag"))
+                        .on_press(Message::AddTag)
+                        .padding([2, 8])
+                        .class(cosmic::theme::Button::Text),
+                )
+                .style(|theme| {
+                    let cosmic = theme.cosmic();
+                    let component = cosmic.background(theme.transparent);
+                    cosmic::widget::container::Style {
+                        icon_color: Some(component.on.into()),
+                        text_color: Some(component.on.into()),
+                        background: None,
+                        border: cosmic::iced::Border {
+                            radius: cosmic.radius_s().into(),
+                            width: 1.0,
+                            color: component.divider.into(),
+                        },
+                        ..Default::default()
+                    }
+                }),
             );
         }
         widget::container(row)
-            .padding([0, cosmic::theme::spacing().space_s, cosmic::theme::spacing().space_xxs, cosmic::theme::spacing().space_s])
+            .padding([
+                0,
+                cosmic::theme::spacing().space_s,
+                cosmic::theme::spacing().space_xxs,
+                cosmic::theme::spacing().space_s,
+            ])
             .width(Length::Fill)
             .into()
     }
