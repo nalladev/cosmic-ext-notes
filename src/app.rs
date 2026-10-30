@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use crate::config::Config;
-use crate::editor::{self, BlockKind};
+use crate::editor::{self, MarkdownFormat};
 use crate::fl;
 use crate::notes::{Note, SaveOutcome, Tree, TreeNode, Vault};
 use crate::sidebar_area::SidebarMouseArea;
@@ -15,11 +15,11 @@ use cosmic::prelude::*;
 use cosmic::widget::menu::{ItemHeight, ItemWidth};
 use cosmic::widget::{
     self, Toasts, about::About, button, divider, icon, menu, nav_bar, popover, responsive_menu_bar,
-    segmented_button, text_editor, text_input, toaster, tooltip,
+    segmented_button, text_input, toaster, tooltip,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const APP_ICON: &[u8] = include_bytes!("../resources/icon.svg");
@@ -30,74 +30,6 @@ static MENU_ID: std::sync::LazyLock<cosmic::widget::Id> =
 
 /// How often the autosave tick fires.
 const AUTOSAVE_INTERVAL: Duration = Duration::from_millis(500);
-/// How long consecutive typing in one block stays coalesced into a single
-/// undo step.
-const UNDO_COALESCE: Duration = Duration::from_millis(800);
-/// The maximum number of undo snapshots kept per note.
-const UNDO_LIMIT: usize = 100;
-/// An entry in the slash command menu.
-struct SlashItem {
-    /// The kind the block converts to.
-    kind: BlockKind,
-    /// The toolbar icon name for the entry.
-    icon: &'static str,
-    /// The i18n key of the entry label.
-    label: &'static str,
-}
-
-/// The slash command menu entries, in display order.
-const SLASH_ITEMS: &[SlashItem] = &[
-    SlashItem {
-        kind: BlockKind::Paragraph,
-        icon: "format-justify-left-symbolic",
-        label: "paragraph",
-    },
-    SlashItem {
-        kind: BlockKind::Heading(1),
-        icon: "format-text-heading-1-symbolic",
-        label: "heading-1",
-    },
-    SlashItem {
-        kind: BlockKind::Heading(2),
-        icon: "format-text-heading-2-symbolic",
-        label: "heading-2",
-    },
-    SlashItem {
-        kind: BlockKind::Heading(3),
-        icon: "format-text-heading-3-symbolic",
-        label: "heading-3",
-    },
-    SlashItem {
-        kind: BlockKind::Bullet(0),
-        icon: "format-list-unordered-symbolic",
-        label: "bullet-list",
-    },
-    SlashItem {
-        kind: BlockKind::Numbered(0, 1),
-        icon: "format-list-ordered-symbolic",
-        label: "numbered-list",
-    },
-    SlashItem {
-        kind: BlockKind::Todo(0, false),
-        icon: "format-list-checkbox-symbolic",
-        label: "todo-list",
-    },
-    SlashItem {
-        kind: BlockKind::Quote(0),
-        icon: "format-quote-block-symbolic",
-        label: "quote",
-    },
-    SlashItem {
-        kind: BlockKind::Code(String::new()),
-        icon: "format-text-code-symbolic",
-        label: "code-block",
-    },
-    SlashItem {
-        kind: BlockKind::Divider,
-        icon: "insert-horizontal-rule-symbolic",
-        label: "divider",
-    },
-];
 /// Widget id of the note title input.
 const TITLE_ID: &str = "note-title";
 /// Widget id of the folder name input in the sidebar dialog.
@@ -174,110 +106,12 @@ pub enum Message {
     SidebarContextMenuPoint(Point),
     /// Dismiss the sidebar's empty-area context menu.
     SidebarContextMenuClose,
-    /// An action was performed in the text editor of the block with the given
-    /// index.
-    BlockAction {
-        index: usize,
-        action: text_editor::Action,
-    },
-    /// Toggle the checked state of the todo block with the given index.
-    ToggleTodo(usize),
-    /// Split the block at the cursor (Enter): the text after the cursor moves
-    /// into a new block of `kind` inserted after it.
-    SplitBlock {
-        index: usize,
-        kind: BlockKind,
-        before: String,
-        after: String,
-    },
-    /// Replace the block with the given kind and content (typed markdown
-    /// prefix, or backspace that removes a list marker).
-    ConvertBlock {
-        index: usize,
-        kind: BlockKind,
-        content: String,
-    },
-    /// Shift the nesting level of the block (Tab, Shift+Tab, or backspace on a
-    /// nested item).
-    ChangeLevel {
-        index: usize,
-        delta: i8,
-    },
-    /// Merge the block into the previous one (backspace at the start).
-    MergeUp {
-        index: usize,
-    },
-    /// Move focus to the editable block before the given index, placing the
-    /// caret at its end.
-    FocusPrevious(usize),
-    /// Move focus to the editable block after the given index, placing the
-    /// caret at its start.
-    FocusNext(usize),
-    /// Convert the block at the given index to the given kind, keeping its
-    /// text when the kind has one (toolbar block-style buttons).
-    FormatBlock {
-        index: usize,
-        kind: BlockKind,
-    },
-    /// Wrap the block's selection with the given inline markdown markers.
-    WrapInline {
-        index: usize,
-        marker: InlineMarker,
-    },
-    /// Convert the block into a divider and move focus below it (typed
-    /// `---` followed by Enter).
-    InsertDivider(usize),
-    /// Undo the last document-wide change (Ctrl+Z).
-    Undo,
-    /// Redo the last undone change (Ctrl+Shift+Z or Ctrl+Y).
-    Redo,
-    /// Open the slash command menu for the block with the given index
-    /// (typed `/` in an empty paragraph).
-    SlashMenuOpen(usize),
-    /// Close the slash command menu without applying anything.
-    SlashMenuClose,
-    /// Move the slash menu highlight by the given delta (-1 or 1).
-    SlashMenuMove(i8),
-    /// Apply the highlighted slash menu entry.
-    SlashMenuSelect,
-    /// Apply the slash menu entry for the given block kind, closing the menu.
-    SlashMenuPick {
-        /// The block to convert.
-        index: usize,
-        /// The kind to convert it to.
-        kind: BlockKind,
-    },
+    /// Native source-mapped Markdown editor input.
+    Editor(editor::Message),
     /// Periodic autosave tick.
     AutosaveTick,
     /// Save the active note now.
     SaveNow,
-}
-
-/// Inline markdown formatting applied to a block's selection by the toolbar.
-/// The markers are inserted as visible characters; this editor has no rich
-/// text spans, so the raw markdown stays in the buffer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InlineMarker {
-    /// `**bold**`
-    Bold,
-    /// `*italic*`
-    Italic,
-    /// `` `code` ``
-    Code,
-    /// `~~strikethrough~~`
-    Strikethrough,
-}
-
-impl InlineMarker {
-    /// The delimiters that open and close this marker.
-    fn delimiters(self) -> (&'static str, &'static str) {
-        match self {
-            Self::Bold => ("**", "**"),
-            Self::Italic => ("*", "*"),
-            Self::Code => ("`", "`"),
-            Self::Strikethrough => ("~~", "~~"),
-        }
-    }
 }
 
 /// Keyboard shortcuts handled by the application.
@@ -310,15 +144,6 @@ impl Shortcut {
     }
 }
 
-/// A block rendered in the editor: the block kind plus the editable text
-/// buffer, which keeps the cursor and selection state between frames.
-struct EditableBlock {
-    /// What kind of block this is.
-    kind: BlockKind,
-    /// The editable text buffer for the block content.
-    content: text_editor::Content,
-}
-
 /// An item displayed by COSMIC's navigation sidebar.
 #[derive(Clone)]
 enum NavEntry {
@@ -342,118 +167,51 @@ enum SidebarDialogKind {
     RenameFolder { path: PathBuf },
 }
 
-impl EditableBlock {
-    /// Builds an editable block from a pure model block.
-    fn from_block(block: editor::Block) -> Self {
-        Self {
-            kind: block.kind,
-            content: text_editor::Content::with_text(&block.content),
-        }
-    }
-
-    /// Converts this editable block back into a pure model block.
-    fn to_block(&self) -> editor::Block {
-        editor::Block {
-            kind: self.kind.clone(),
-            content: self.content.text(),
-        }
-    }
-}
-
-/// A tab in the editor: the open note plus its editor state. A tab with no
-/// note path is a fresh "+" tab: the editor pane shows the empty state until
-/// a note is picked from the sidebar, which loads into it.
+/// Each tab owns one authored Markdown document and its cursor/history.
 struct Tab {
-    /// The path of the note this tab edits, if any.
     path: Option<PathBuf>,
-    /// The blocks of the note, each with an editable text buffer.
-    blocks: Vec<EditableBlock>,
-    /// The index of the block the toolbar acts on (the last one focused).
-    selected_block: usize,
-    /// Undo history: snapshots of the whole document, newest last.
-    undo_stack: Vec<Vec<editor::Block>>,
-    /// Redo history, cleared by any new edit.
-    redo_stack: Vec<Vec<editor::Block>>,
-    /// When the last undo snapshot was taken and in which block, so that
-    /// bursts of typing collapse into a single undo step.
-    last_undo_at: Option<(Instant, usize)>,
-    /// The block index whose slash command menu is open, if any.
-    slash_menu: Option<usize>,
-    /// The highlighted entry of the open slash menu.
-    slash_selection: usize,
-    /// The title being edited for this tab.
+    editor: editor::Editor,
+    saved_body: String,
     title_draft: String,
-    /// Whether this tab has unsaved changes.
     dirty: bool,
 }
 
 impl Tab {
-    /// Builds an editor tab for the note at `path`, loaded from `body` and
-    /// `title`. An empty note still gets one empty block so the editor has a
-    /// focusable surface that shows the placeholder.
     fn new(path: PathBuf, body: &str, title: &str) -> Self {
-        let mut blocks: Vec<EditableBlock> = editor::parse_markdown(body)
-            .into_iter()
-            .map(EditableBlock::from_block)
-            .collect();
-        if blocks.is_empty() {
-            blocks.push(EditableBlock::from_block(editor::Block::paragraph("")));
+        let mut editor = editor::Editor::new(body);
+        if let Some(parent) = path.parent() {
+            editor.set_image_directory(parent);
         }
         Self {
             path: Some(path),
-            blocks,
-            selected_block: 0,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            last_undo_at: None,
-            slash_menu: None,
-            slash_selection: 0,
+            editor,
+            saved_body: body.to_owned(),
             title_draft: title.to_owned(),
             dirty: false,
         }
     }
 
-    /// Loads the given body and title into this tab, resetting its editor
-    /// state (undo history, slash menu, dirty flag).
     fn load_body(&mut self, body: &str, title: &str) {
-        let mut blocks: Vec<EditableBlock> = editor::parse_markdown(body)
-            .into_iter()
-            .map(EditableBlock::from_block)
-            .collect();
-        // An empty note still gets one empty block so the editor has a
-        // focusable surface that shows the placeholder.
-        if blocks.is_empty() {
-            blocks.push(EditableBlock::from_block(editor::Block::paragraph("")));
+        self.editor = editor::Editor::new(body);
+        if let Some(parent) = self.path.as_ref().and_then(|path| path.parent()) {
+            self.editor.set_image_directory(parent);
         }
-        self.blocks = blocks;
-        self.selected_block = 0;
-        self.undo_stack.clear();
-        self.redo_stack.clear();
-        self.last_undo_at = None;
-        self.slash_menu = None;
+        self.saved_body = body.to_owned();
         title.clone_into(&mut self.title_draft);
         self.dirty = false;
     }
 
-    /// A fresh, empty tab with no note behind it yet. The editor pane shows
-    /// the empty state until a note is picked from the sidebar.
     fn blank() -> Self {
         Self {
             path: None,
-            blocks: Vec::new(),
-            selected_block: 0,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            last_undo_at: None,
-            slash_menu: None,
-            slash_selection: 0,
+            editor: editor::Editor::new(""),
+            saved_body: String::new(),
             title_draft: String::new(),
             dirty: false,
         }
     }
 }
 
-/// Create a COSMIC application from the app model
 impl cosmic::Application for AppModel {
     /// The async executor that will be used to run your application's commands.
     type Executor = cosmic::executor::Default;
@@ -717,7 +475,9 @@ impl cosmic::Application for AppModel {
         // tab that was active. Older configs only remember a single note;
         // those restore as a single tab.
         let mut restore_paths: Vec<String> = app.config.open_tabs().to_vec();
-        if restore_paths.is_empty() && let Some(relative) = app.config.last_note() {
+        if restore_paths.is_empty()
+            && let Some(relative) = app.config.last_note()
+        {
             restore_paths.push(relative.to_owned());
         }
         for relative in &restore_paths {
@@ -844,11 +604,7 @@ impl cosmic::Application for AppModel {
             // endless loop. Only `Status::Ignored` events are considered, the
             // same filter `event::listen()` applied.
             event::listen_with(|event, status, _window| match event {
-                event::Event::Keyboard(keyboard::Event::KeyPressed {
-                    key,
-                    modifiers,
-                    ..
-                }) => {
+                event::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                     if status != event::Status::Ignored {
                         return None;
                     }
@@ -1077,328 +833,12 @@ impl cosmic::Application for AppModel {
                 Task::none()
             }
 
-            Message::BlockAction { index, action } => {
-                let Some(tab) = self.active_tab_mut() else {
-                    return Task::none();
-                };
-                tab.selected_block = index;
-                // A multi-line paste splits into blocks, like Futo; the
-                // editor's default behavior would embed raw newlines into
-                // the block.
-                if let Some(task) = Self::intercept_paste(tab, index, &action) {
-                    return Task::batch([task, self.update_title()]);
-                }
-                let is_edit = action.is_edit();
-                if is_edit {
-                    Self::push_undo(tab, index);
-                }
-                let Some(block) = tab.blocks.get_mut(index) else {
-                    return Task::none();
-                };
-                block.content.perform(action);
-                if is_edit {
-                    tab.dirty = true;
-                }
-                self.update_title()
-            }
-
-            Message::ToggleTodo(index) => {
-                let Some(tab) = self.active_tab_mut() else {
-                    return Task::none();
-                };
-                tab.selected_block = index;
-                Self::push_undo_step(tab);
-                let Some(block) = tab.blocks.get_mut(index) else {
-                    return Task::none();
-                };
-                if let BlockKind::Todo(_, done) = &mut block.kind {
-                    *done = !*done;
-                    tab.dirty = true;
-                }
-                self.update_title()
-            }
-
-            Message::SplitBlock {
-                index,
-                kind,
-                before,
-                after,
-            } => {
-                let Some(tab) = self.active_tab_mut() else {
-                    return Task::none();
-                };
-                Self::push_undo_step(tab);
-                let Some(block) = tab.blocks.get_mut(index) else {
-                    return Task::none();
-                };
-                block.content = text_editor::Content::with_text(&before);
-                tab.blocks.insert(
-                    index + 1,
-                    EditableBlock {
-                        kind,
-                        content: text_editor::Content::with_text(&after),
-                    },
-                );
-                renumber_blocks(&mut tab.blocks);
-                tab.selected_block = index + 1;
-                tab.dirty = true;
-                Task::batch([
-                    Self::focus_block(index + 1).map(cosmic::action::app),
-                    self.update_title(),
-                ])
-            }
-
-            Message::ConvertBlock {
-                index,
-                kind,
-                content,
-            } => {
-                let Some(tab) = self.active_tab_mut() else {
-                    return Task::none();
-                };
-                tab.selected_block = index;
-                Self::push_undo_step(tab);
-                let Some(block) = tab.blocks.get_mut(index) else {
-                    return Task::none();
-                };
-                block.kind = kind;
-                block.content = text_editor::Content::with_text(&content);
-                renumber_blocks(&mut tab.blocks);
-                tab.dirty = true;
-                self.update_title()
-            }
-
-            Message::ChangeLevel { index, delta } => {
-                let Some(tab) = self.active_tab_mut() else {
-                    return Task::none();
-                };
-                tab.selected_block = index;
-                Self::push_undo_step(tab);
-                let Some(block) = tab.blocks.get_mut(index) else {
-                    return Task::none();
-                };
-                let Some(kind) = Self::shift_level(&block.kind, delta) else {
-                    return Task::none();
-                };
-                block.kind = kind;
-                renumber_blocks(&mut tab.blocks);
-                tab.dirty = true;
-                self.update_title()
-            }
-
-            Message::MergeUp { index } => {
-                let Some(tab) = self.active_tab_mut() else {
-                    return Task::none();
-                };
-                if index == 0 || index >= tab.blocks.len() {
-                    return Task::none();
-                }
-                Self::push_undo_step(tab);
-                let merged = tab.blocks.remove(index);
-                let Some(prev) = tab.blocks.get_mut(index - 1) else {
-                    return Task::none();
-                };
-                let text = prev.content.text() + &merged.content.text();
-                prev.content = text_editor::Content::with_text(&text);
-                let cursor = Self::end_cursor(&prev.content);
-                prev.content.move_to(cursor);
-                renumber_blocks(&mut tab.blocks);
-                tab.selected_block = index - 1;
-                tab.dirty = true;
-                Task::batch([
-                    Self::focus_block(index - 1).map(cosmic::action::app),
-                    self.update_title(),
-                ])
-            }
-
-            Message::FocusPrevious(index) => {
-                let Some(tab) = self.active_tab_mut() else {
-                    return Task::none();
-                };
-                let Some(target) = Self::previous_editable(&tab.blocks, index) else {
-                    return Task::none();
-                };
-                tab.selected_block = target;
-                let Some(block) = tab.blocks.get_mut(target) else {
-                    return Task::none();
-                };
-                let cursor = Self::end_cursor(&block.content);
-                block.content.move_to(cursor);
-                Self::focus_block(target).map(cosmic::action::app)
-            }
-
-            Message::FocusNext(index) => {
-                let Some(tab) = self.active_tab_mut() else {
-                    return Task::none();
-                };
-                let Some(target) = Self::next_editable(&tab.blocks, index) else {
-                    return Task::none();
-                };
-                tab.selected_block = target;
-                let Some(block) = tab.blocks.get_mut(target) else {
-                    return Task::none();
-                };
-                block.content.move_to(text_editor::Cursor {
-                    position: text_editor::Position { line: 0, column: 0 },
-                    selection: None,
-                });
-                Self::focus_block(target).map(cosmic::action::app)
-            }
-
-            Message::FormatBlock { index, kind } => {
-                let Some(tab) = self.active_tab_mut() else {
-                    return Task::none();
-                };
-                tab.selected_block = index;
-                Task::batch([Self::format_block(tab, index, kind), self.update_title()])
-            }
-
-            Message::WrapInline { index, marker } => {
-                let Some(tab) = self.active_tab_mut() else {
-                    return Task::none();
-                };
-                tab.selected_block = index;
-                Self::push_undo_step(tab);
-                let Some(block) = tab.blocks.get_mut(index) else {
-                    return Task::none();
-                };
-                // Code and divider blocks keep their own layout; inline
-                // formatting only applies to regular content.
-                if matches!(block.kind, BlockKind::Code(_) | BlockKind::Divider) {
-                    return Task::none();
-                }
-                let (open, close) = marker.delimiters();
-                let cursor = block.content.cursor();
-                // Wrap the caret's line in place: `Position::column` is an
-                // offset within the line, so operating on the line avoids
-                // mixing up offsets across line breaks.
-                let line_index = cursor
-                    .position
-                    .line
-                    .min(block.content.line_count().saturating_sub(1));
-                let Some(line) = block.content.line(line_index) else {
-                    return Task::none();
-                };
-                // Only a selection within the caret's line can be wrapped in
-                // place; anything else inserts the markers at the caret.
-                let selection = cursor.selection.and_then(|anchor| {
-                    (anchor.line == cursor.position.line)
-                        .then_some((anchor.column, cursor.position.column))
-                });
-                let result = editor::wrap_inline(
-                    &line.text,
-                    selection,
-                    cursor.position.column,
-                    open,
-                    close,
-                );
-                let mut lines: Vec<String> = block
-                    .content
-                    .lines()
-                    .map(|line| line.text.into_owned())
-                    .collect();
-                lines[line_index] = result.text;
-                block.content = text_editor::Content::with_text(&lines.join("\n"));
-                block.content.move_to(text_editor::Cursor {
-                    position: text_editor::Position {
-                        line: line_index,
-                        column: result.caret,
-                    },
-                    selection: None,
-                });
-                tab.dirty = true;
-                Task::batch([
-                    Self::focus_block(index).map(cosmic::action::app),
-                    self.update_title(),
-                ])
-            }
-
-            Message::InsertDivider(index) => {
-                let Some(tab) = self.active_tab_mut() else {
-                    return Task::none();
-                };
-                tab.selected_block = index;
-                Task::batch([
-                    Self::format_block(tab, index, BlockKind::Divider),
-                    self.update_title(),
-                ])
-            }
-
-            Message::Undo => {
-                let Some(tab) = self.active_tab_mut() else {
-                    return Task::none();
-                };
-                let Some(previous) = tab.undo_stack.pop() else {
-                    return Task::none();
-                };
-                let current = Self::snapshot_tab(tab);
-                tab.redo_stack.push(current);
-                Task::batch([Self::restore_blocks(tab, previous), self.update_title()])
-            }
-
-            Message::Redo => {
-                let Some(tab) = self.active_tab_mut() else {
-                    return Task::none();
-                };
-                let Some(next) = tab.redo_stack.pop() else {
-                    return Task::none();
-                };
-                let current = Self::snapshot_tab(tab);
-                tab.undo_stack.push(current);
-                Task::batch([Self::restore_blocks(tab, next), self.update_title()])
-            }
-
-            Message::SlashMenuOpen(index) => {
-                let Some(tab) = self.active_tab_mut() else {
-                    return Task::none();
-                };
-                tab.slash_menu = Some(index);
-                tab.slash_selection = 0;
-                tab.selected_block = index;
-                Task::none()
-            }
-
-            Message::SlashMenuClose => {
+            Message::Editor(message) => {
                 if let Some(tab) = self.active_tab_mut() {
-                    tab.slash_menu = None;
+                    tab.editor.update(message);
+                    tab.dirty = tab.editor.text() != tab.saved_body;
                 }
-                Task::none()
-            }
-
-            Message::SlashMenuMove(delta) => {
-                let Some(tab) = self.active_tab_mut() else {
-                    return Task::none();
-                };
-                if tab.slash_menu.is_none() {
-                    return Task::none();
-                }
-                tab.slash_selection = if delta > 0 {
-                    (tab.slash_selection + 1).min(SLASH_ITEMS.len() - 1)
-                } else {
-                    tab.slash_selection.saturating_sub(1)
-                };
-                Task::none()
-            }
-
-            Message::SlashMenuSelect => {
-                let Some(tab) = self.active_tab_mut() else {
-                    return Task::none();
-                };
-                let Some(index) = tab.slash_menu.take() else {
-                    return Task::none();
-                };
-                let kind = SLASH_ITEMS[tab.slash_selection].kind.clone();
-                tab.selected_block = index;
-                Task::batch([Self::format_block(tab, index, kind), self.update_title()])
-            }
-
-            Message::SlashMenuPick { index, kind } => {
-                let Some(tab) = self.active_tab_mut() else {
-                    return Task::none();
-                };
-                tab.slash_menu = None;
-                tab.selected_block = index;
-                Task::batch([Self::format_block(tab, index, kind), self.update_title()])
+                self.update_title()
             }
 
             Message::AutosaveTick => self.save_active(false),
@@ -1411,9 +851,6 @@ impl cosmic::Application for AppModel {
     fn on_escape(&mut self) -> Task<cosmic::Action<Self::Message>> {
         self.sidebar_dialog = None;
         self.sidebar_context_menu_point = None;
-        if let Some(tab) = self.active_tab_mut() {
-            tab.slash_menu = None;
-        }
         Task::none()
     }
 
@@ -1442,10 +879,9 @@ impl AppModel {
         self.vault.notes().iter().find(|note| note.path() == path)
     }
 
-    /// The current markdown text of a tab, serialized from its blocks.
+    /// Saving uses the authored source, never a serialization of rendered blocks.
     fn editor_text(tab: &Tab) -> String {
-        let blocks: Vec<editor::Block> = tab.blocks.iter().map(EditableBlock::to_block).collect();
-        editor::serialize_markdown(&blocks)
+        tab.editor.text().to_owned()
     }
 
     /// Inserts a new tab for the note at `path` and makes it active.
@@ -1503,11 +939,7 @@ impl AppModel {
             self.persist_tabs();
             self.refresh_tab_closability();
             self.rebuild_nav_model();
-            return Task::batch([
-                save,
-                Self::focus_block(0).map(cosmic::action::app),
-                self.update_title(),
-            ]);
+            return Task::batch([save, self.update_title()]);
         }
         let Some(note) = self.vault.notes().iter().find(|note| note.path() == path) else {
             return Task::batch([save, self.update_title()]);
@@ -1516,11 +948,7 @@ impl AppModel {
         let title = note.title().to_owned();
         self.new_tab(path, &body, &title);
         self.rebuild_nav_model();
-        Task::batch([
-            save,
-            Self::focus_block(0).map(cosmic::action::app),
-            self.update_title(),
-        ])
+        Task::batch([save, self.update_title()])
     }
 
     /// Opens the sidebar note with the given id in a new tab.
@@ -1574,7 +1002,8 @@ impl AppModel {
                 .tab_model
                 .data::<Tab>(entity)
                 .is_some_and(|tab| tab.path.is_none());
-            self.tab_model.closable_set(entity, !(is_only_tab && is_home));
+            self.tab_model
+                .closable_set(entity, !(is_only_tab && is_home));
         }
     }
 
@@ -1586,11 +1015,10 @@ impl AppModel {
             return;
         };
         let relative = |path: &Path| {
-            path.strip_prefix(self.vault.root())
-                .map_or_else(
-                    |_| path.to_string_lossy().into_owned(),
-                    |relative| relative.to_string_lossy().into_owned(),
-                )
+            path.strip_prefix(self.vault.root()).map_or_else(
+                |_| path.to_string_lossy().into_owned(),
+                |relative| relative.to_string_lossy().into_owned(),
+            )
         };
         let open_tabs = self
             .tab_model
@@ -1643,7 +1071,8 @@ impl AppModel {
     /// Creates a new note inside the folder with the given sidebar id and
     /// opens it in a new tab, expanding the folder to reveal it.
     fn new_note_in_folder(&mut self, entity: nav_bar::Id) -> Task<cosmic::Action<Message>> {
-        let Some(NavEntry::Folder(parent)) = self.nav_model.data::<NavEntry>(entity).cloned() else {
+        let Some(NavEntry::Folder(parent)) = self.nav_model.data::<NavEntry>(entity).cloned()
+        else {
             return Task::none();
         };
         let save = self.save_active(false);
@@ -1688,6 +1117,7 @@ impl AppModel {
         match self.vault.save(&path, &body) {
             Ok(Some(SaveOutcome::Saved)) => {
                 if let Some(tab) = self.active_tab_mut() {
+                    tab.saved_body = body.clone();
                     tab.dirty = false;
                 }
                 if notify {
@@ -1963,13 +1393,9 @@ impl AppModel {
                         .retain(|expanded| !expanded.starts_with(&path));
                     let entities: Vec<_> = self.tab_model.iter().collect();
                     for entity in entities {
-                        if self
-                            .tab_model
-                            .data::<Tab>(entity)
-                            .is_some_and(|tab| {
-                                tab.path.as_deref().is_some_and(|p| p.starts_with(&path))
-                            })
-                        {
+                        if self.tab_model.data::<Tab>(entity).is_some_and(|tab| {
+                            tab.path.as_deref().is_some_and(|p| p.starts_with(&path))
+                        }) {
                             self.close_tab(entity);
                         }
                     }
@@ -2148,395 +1574,124 @@ impl AppModel {
         )
     }
 
-    /// The block editor: a scrollable column of per-block text editors for
-    /// the active tab.
     fn block_editor(&self) -> Element<'_, Message> {
-        let Some(tab) = self.active_tab() else {
-            return widget::scrollable(widget::space()).height(Length::Fill).into();
-        };
+        match self.active_tab() {
+            Some(tab) => tab.editor.view().map(Message::Editor),
+            None => widget::space().into(),
+        }
+    }
+
+    /// Commands act on the canonical selection, including cross-block selections.
+    fn block_toolbar(&self) -> Element<'_, Message> {
         let spacing = cosmic::theme::spacing();
-        let mut column = widget::column::with_capacity(tab.blocks.len());
-        for (index, block) in tab.blocks.iter().enumerate() {
-            column = column.push(Self::block_element(
-                index,
-                block,
-                &tab.blocks,
-                tab.slash_menu == Some(index),
-                tab.slash_selection,
+        let mut row = widget::row::with_capacity(18).spacing(spacing.space_xxs);
+        for (icon, format, label) in [
+            (
+                "format-justify-left-symbolic",
+                MarkdownFormat::Paragraph,
+                fl!("paragraph"),
+            ),
+            (
+                "format-text-heading-1-symbolic",
+                MarkdownFormat::Heading(1),
+                fl!("heading-1"),
+            ),
+            (
+                "format-text-heading-2-symbolic",
+                MarkdownFormat::Heading(2),
+                fl!("heading-2"),
+            ),
+            (
+                "format-text-heading-3-symbolic",
+                MarkdownFormat::Heading(3),
+                fl!("heading-3"),
+            ),
+            (
+                "format-list-unordered-symbolic",
+                MarkdownFormat::UnorderedList,
+                fl!("bullet-list"),
+            ),
+            (
+                "format-list-ordered-symbolic",
+                MarkdownFormat::OrderedList,
+                fl!("numbered-list"),
+            ),
+            (
+                "format-list-checkbox-symbolic",
+                MarkdownFormat::TaskList,
+                fl!("todo-list"),
+            ),
+            (
+                "format-quote-block-symbolic",
+                MarkdownFormat::BlockQuote,
+                fl!("quote"),
+            ),
+            (
+                "format-text-code-symbolic",
+                MarkdownFormat::CodeFence,
+                fl!("code-block"),
+            ),
+            (
+                "format-text-bold-symbolic",
+                MarkdownFormat::Bold,
+                fl!("bold"),
+            ),
+            (
+                "format-text-italic-symbolic",
+                MarkdownFormat::Italic,
+                fl!("italic"),
+            ),
+            (
+                "format-text-code-symbolic",
+                MarkdownFormat::InlineCode,
+                fl!("inline-code"),
+            ),
+        ] {
+            row = row.push(Self::editor_button(
+                icon,
+                editor::Message::Format(format),
+                label,
             ));
         }
-        widget::scrollable(
-            widget::container(column.spacing(0))
-                .padding([spacing.space_s, spacing.space_s])
-                .width(Length::Fill),
-        )
-        .height(Length::Fill)
-        .into()
-    }
-
-    /// Renders a single block as an editable widget, wrapped in the slash
-    /// command popover when it is open for that block.
-    fn block_element<'a>(
-        index: usize,
-        block: &'a EditableBlock,
-        blocks: &'a [EditableBlock],
-        slash_open: bool,
-        slash_selection: usize,
-    ) -> Element<'a, Message> {
-        let spacing = cosmic::theme::spacing();
-        let mut editor = cosmic::widget::text_editor(&block.content)
-            .id(cosmic::widget::Id::new(format!("block-{index}")))
-            .on_action(move |action| Message::BlockAction { index, action })
-            .key_binding(move |key_press| {
-                Self::block_key_binding(index, block, blocks, key_press, slash_open)
-            })
-            .highlight("markdown", Self::highlight_theme())
-            .size(15)
-            .padding([spacing.space_xxs, 0]);
-        if index == 0 {
-            editor = editor.placeholder(fl!("note-placeholder"));
-        }
-        let element: Element<'a, Message> = match &block.kind {
-            BlockKind::Paragraph => editor.into(),
-            BlockKind::Heading(level) => editor
-                .font(cosmic::font::semibold())
-                .size(Self::heading_size(*level))
-                .into(),
-            BlockKind::Quote(_level) => widget::row::with_capacity(2)
-                .push(Self::quote_stripe())
-                .push(editor)
-                .align_y(Alignment::Center)
-                .into(),
-            BlockKind::Bullet(_level) => {
-                Self::list_item(Self::indent(block.kind.level()), "•", editor)
-            }
-            BlockKind::Numbered(_level, number) => {
-                Self::list_item(Self::indent(block.kind.level()), number.to_string(), editor)
-            }
-            BlockKind::Todo(_level, done) => {
-                let checkbox = cosmic::widget::checkbox(*done)
-                    .size(16)
-                    .on_toggle(move |_| Message::ToggleTodo(index));
-                widget::row::with_capacity(3)
-                    .push(widget::text(Self::indent(block.kind.level())))
-                    .push(checkbox)
-                    .push(editor)
-                    .align_y(Alignment::Center)
-                    .into()
-            }
-            BlockKind::Code(_lang) => widget::container(editor.font(cosmic::font::mono()))
-                .class(cosmic::theme::Container::Card)
-                .padding([spacing.space_xxs, spacing.space_xs])
-                .width(Length::Fill)
-                .into(),
-            BlockKind::Divider => widget::container(divider::horizontal::default())
-                .padding([spacing.space_s, 0])
-                .width(Length::Fill)
-                .into(),
-        };
-        if slash_open {
-            let popup = Self::slash_menu_element(index, slash_selection);
-            return popover::popover(element)
-                .position(popover::Position::Bottom)
-                .on_close(Message::SlashMenuClose)
-                .popup(popup)
-                .into();
-        }
-        element
-    }
-
-    /// The slash command menu popup: the block-style conversions, with the
-    /// highlighted entry marked.
-    fn slash_menu_element(index: usize, selection: usize) -> Element<'static, Message> {
-        let spacing = cosmic::theme::spacing();
-        let mut column =
-            widget::column::with_capacity(SLASH_ITEMS.len()).spacing(spacing.space_xxs);
-        for (i, item) in SLASH_ITEMS.iter().enumerate() {
-            let content = widget::row::with_capacity(2)
-                .push(icon::icon(Self::toolbar_icon(item.icon)).size(16))
-                .push(widget::text(Self::slash_label(item.label)))
-                .spacing(spacing.space_s)
-                .align_y(Alignment::Center);
-            column = column.push(
-                button::custom(content)
-                    .on_press(Message::SlashMenuPick {
-                        index,
-                        kind: item.kind.clone(),
-                    })
-                    .selected(i == selection)
-                    .class(cosmic::theme::Button::Text)
-                    .width(Length::Fill),
-            );
-        }
-        widget::container(column)
-            .class(cosmic::theme::Container::Card)
-            .padding([spacing.space_xs, spacing.space_s])
-            .into()
-    }
-
-    /// The localized label for a slash menu entry key.
-    #[must_use]
-    fn slash_label(key: &str) -> String {
-        match key {
-            "paragraph" => fl!("paragraph"),
-            "heading-1" => fl!("heading-1"),
-            "heading-2" => fl!("heading-2"),
-            "heading-3" => fl!("heading-3"),
-            "bullet-list" => fl!("bullet-list"),
-            "numbered-list" => fl!("numbered-list"),
-            "todo-list" => fl!("todo-list"),
-            "quote" => fl!("quote"),
-            "code-block" => fl!("code-block"),
-            "divider" => fl!("divider"),
-            _ => key.to_owned(),
-        }
-    }
-
-    /// Renders a list marker followed by the block's editor.
-    fn list_item<'a, E>(
-        indent: String,
-        marker: impl Into<String>,
-        editor: E,
-    ) -> Element<'a, Message>
-    where
-        E: Into<Element<'a, Message>>,
-    {
-        let mut label = indent;
-        label.push_str(&marker.into());
-        widget::row::with_capacity(2)
-            .push(widget::text(label))
-            .push(editor)
-            .align_y(Alignment::Center)
-            .into()
-    }
-
-    /// The indentation prefix for a nesting level (two spaces per level).
-    #[must_use]
-    fn indent(level: u8) -> String {
-        "  ".repeat(usize::from(level))
-    }
-
-    /// The font size for a heading of the given level.
-    #[must_use]
-    fn heading_size(level: u8) -> f32 {
-        match level {
-            1 => 24.0,
-            2 => 21.0,
-            3 => 18.0,
-            4 => 16.0,
-            _ => 15.0,
-        }
-    }
-
-    /// The syntax highlighting theme for the current color scheme.
-    #[must_use]
-    fn highlight_theme() -> cosmic::iced::highlighter::Theme {
-        if cosmic::theme::active_type().is_dark() {
-            cosmic::iced::highlighter::Theme::SolarizedDark
-        } else {
-            cosmic::iced::highlighter::Theme::InspiredGitHub
-        }
-    }
-
-    /// A thin vertical accent stripe used as the quote block marker.
-    fn quote_stripe() -> Element<'static, Message> {
-        let mut color: cosmic::iced::Color = cosmic::theme::active().cosmic().accent.base.into();
-        color.a = 0.6;
-        widget::container(
-            widget::space()
-                .width(Length::Fixed(3.0))
-                .height(Length::Fill),
-        )
-        .style(move |_theme| cosmic::iced::widget::container::Style {
-            background: Some(cosmic::iced::Background::Color(color)),
-            ..Default::default()
-        })
-        .into()
-    }
-
-    /// The formatting toolbar for the active tab's selected block: block
-    /// style conversions and inline markdown wrapping. The active style is
-    /// highlighted.
-    fn block_toolbar(&self) -> Element<'_, Message> {
-        let Some(tab) = self.active_tab() else {
-            return widget::container(widget::space()).into();
-        };
-        let spacing = cosmic::theme::spacing();
-        let index = tab.selected_block.min(tab.blocks.len().saturating_sub(1));
-        let kind = tab
-            .blocks
-            .get(index)
-            .map_or(&BlockKind::Paragraph, |block| &block.kind);
-
-        let mut row = Self::style_buttons(index, kind);
-        row = row.push(divider::vertical::default());
-        row = row.push(Self::inline_button(
-            index,
-            Self::toolbar_icon("format-text-bold-symbolic"),
-            InlineMarker::Bold,
-            fl!("bold"),
-        ));
-        row = row.push(Self::inline_button(
-            index,
-            Self::toolbar_icon("format-text-italic-symbolic"),
-            InlineMarker::Italic,
-            fl!("italic"),
-        ));
-        row = row.push(Self::inline_button(
-            index,
-            Self::toolbar_icon("format-text-strikethrough-symbolic"),
-            InlineMarker::Strikethrough,
-            fl!("strikethrough"),
-        ));
-        row = row.push(Self::inline_button(
-            index,
-            Self::toolbar_icon("format-text-code-symbolic"),
-            InlineMarker::Code,
-            fl!("inline-code"),
-        ));
-
-        row = row.push(divider::vertical::default());
-        row = row.push(Self::level_button(
-            index,
-            Self::toolbar_icon("format-indent-less-symbolic"),
-            -1,
-            fl!("outdent"),
-        ));
-        row = row.push(Self::level_button(
-            index,
-            Self::toolbar_icon("format-indent-more-symbolic"),
-            1,
-            fl!("indent"),
-        ));
-
+        row = row
+            .push(Self::editor_button(
+                "format-indent-less-symbolic",
+                editor::Message::Indent(false),
+                fl!("outdent"),
+            ))
+            .push(Self::editor_button(
+                "format-indent-more-symbolic",
+                editor::Message::Indent(true),
+                fl!("indent"),
+            ))
+            .push(Self::editor_button(
+                "edit-undo-symbolic",
+                editor::Message::Undo,
+                "Undo (Ctrl+Z)".into(),
+            ))
+            .push(Self::editor_button(
+                "edit-redo-symbolic",
+                editor::Message::Redo,
+                "Redo (Ctrl+Shift+Z)".into(),
+            ));
         widget::container(row)
             .width(Length::Fill)
             .padding([spacing.space_xxs, spacing.space_s])
             .into()
     }
 
-    /// The block-style conversion buttons for the selected block, with the
-    /// active style highlighted.
-    fn style_buttons(
-        index: usize,
-        kind: &BlockKind,
-    ) -> cosmic::widget::Row<'static, Message, cosmic::Theme, cosmic::Renderer> {
-        let spacing = cosmic::theme::spacing();
-        let mut row = widget::row::with_capacity(10).spacing(spacing.space_xxs);
-        row = row.push(Self::style_button(
-            index,
-            *kind == BlockKind::Paragraph,
-            Self::toolbar_icon("format-justify-left-symbolic"),
-            BlockKind::Paragraph,
-            fl!("paragraph"),
-        ));
-        row = row.push(Self::style_button(
-            index,
-            *kind == BlockKind::Heading(1),
-            Self::toolbar_icon("format-text-heading-1-symbolic"),
-            BlockKind::Heading(1),
-            fl!("heading-1"),
-        ));
-        row = row.push(Self::style_button(
-            index,
-            *kind == BlockKind::Heading(2),
-            Self::toolbar_icon("format-text-heading-2-symbolic"),
-            BlockKind::Heading(2),
-            fl!("heading-2"),
-        ));
-        row = row.push(Self::style_button(
-            index,
-            *kind == BlockKind::Heading(3),
-            Self::toolbar_icon("format-text-heading-3-symbolic"),
-            BlockKind::Heading(3),
-            fl!("heading-3"),
-        ));
-        row = row.push(Self::style_button(
-            index,
-            *kind == BlockKind::Bullet(0),
-            Self::toolbar_icon("format-list-unordered-symbolic"),
-            BlockKind::Bullet(0),
-            fl!("bullet-list"),
-        ));
-        row = row.push(Self::style_button(
-            index,
-            *kind == BlockKind::Numbered(0, 1),
-            Self::toolbar_icon("format-list-ordered-symbolic"),
-            BlockKind::Numbered(0, 1),
-            fl!("numbered-list"),
-        ));
-        row = row.push(Self::style_button(
-            index,
-            matches!(kind, BlockKind::Todo(..)),
-            Self::toolbar_icon("format-list-checkbox-symbolic"),
-            BlockKind::Todo(0, false),
-            fl!("todo-list"),
-        ));
-        row = row.push(Self::style_button(
-            index,
-            matches!(kind, BlockKind::Quote(_)),
-            Self::toolbar_icon("format-quote-block-symbolic"),
-            BlockKind::Quote(0),
-            fl!("quote"),
-        ));
-        row = row.push(Self::style_button(
-            index,
-            matches!(kind, BlockKind::Code(_)),
-            Self::toolbar_icon("format-text-code-symbolic"),
-            BlockKind::Code(String::new()),
-            fl!("code-block"),
-        ));
-        row = row.push(Self::style_button(
-            index,
-            *kind == BlockKind::Divider,
-            Self::toolbar_icon("insert-horizontal-rule-symbolic"),
-            BlockKind::Divider,
-            fl!("divider"),
-        ));
-
-        row
-    }
-
-    /// A toolbar button that converts the selected block to the given kind.
-    fn style_button(
-        index: usize,
-        active: bool,
-        handle: icon::Handle,
-        kind: BlockKind,
+    fn editor_button(
+        name: &'static str,
+        command: editor::Message,
         label: String,
     ) -> Element<'static, Message> {
-        let button = button::icon(handle)
-            .on_press(Message::FormatBlock { index, kind })
-            .selected(active)
-            .class(cosmic::theme::Button::Icon);
-        Self::tooltip(button.into(), label)
-    }
-
-    /// A toolbar button that wraps the selected block's selection in the
-    /// given inline markdown markers.
-    fn inline_button(
-        index: usize,
-        handle: icon::Handle,
-        marker: InlineMarker,
-        label: String,
-    ) -> Element<'static, Message> {
-        let button = button::icon(handle)
-            .on_press(Message::WrapInline { index, marker })
-            .class(cosmic::theme::Button::Icon);
-        Self::tooltip(button.into(), label)
-    }
-
-    /// A toolbar button that shifts the nesting level of the selected block.
-    fn level_button(
-        index: usize,
-        handle: icon::Handle,
-        delta: i8,
-        label: String,
-    ) -> Element<'static, Message> {
-        let button = button::icon(handle)
-            .on_press(Message::ChangeLevel { index, delta })
-            .class(cosmic::theme::Button::Icon);
-        Self::tooltip(button.into(), label)
+        Self::tooltip(
+            button::icon(Self::toolbar_icon(name))
+                .on_press(Message::Editor(command))
+                .class(cosmic::theme::Button::Icon)
+                .into(),
+            label,
+        )
     }
 
     /// Loads a toolbar icon, using bundled SVGs for glyphs that the icon
@@ -2581,502 +1736,6 @@ impl AppModel {
             .symbolic(true),
             _ => icon::from_name(name).handle(),
         }
-    }
-
-    /// The document-wide undo/redo binding for a key press, if it matches
-    /// Ctrl+Z (undo) or Ctrl+Shift+Z / Ctrl+Y (redo). Returns `None` for
-    /// anything else.
-    fn undo_redo_binding(
-        key_press: &text_editor::KeyPress,
-    ) -> Option<text_editor::Binding<Message>> {
-        use cosmic::widget::text_editor::Binding;
-        if !key_press.modifiers.control() {
-            return None;
-        }
-        match (key_press.modified_key.as_ref(), key_press.modifiers.shift()) {
-            (Key::Character("z"), false) => Some(Binding::Custom(Message::Undo)),
-            (Key::Character("z"), true) | (Key::Character("y"), false) => {
-                Some(Binding::Custom(Message::Redo))
-            }
-            _ => None,
-        }
-    }
-
-    /// The binding while the slash menu is open: navigation and selection,
-    /// swallowing all other keys so they do not reach the block editor.
-    fn slash_menu_binding(
-        key_press: &text_editor::KeyPress,
-    ) -> Option<text_editor::Binding<Message>> {
-        use cosmic::iced::keyboard::key::Named;
-        use cosmic::widget::text_editor::Binding;
-        match key_press.modified_key.as_ref() {
-            Key::Named(Named::Escape) => Some(Binding::Custom(Message::SlashMenuClose)),
-            Key::Named(Named::ArrowUp) => Some(Binding::Custom(Message::SlashMenuMove(-1))),
-            Key::Named(Named::ArrowDown) => Some(Binding::Custom(Message::SlashMenuMove(1))),
-            Key::Named(Named::Enter | Named::Tab) => {
-                Some(Binding::Custom(Message::SlashMenuSelect))
-            }
-            _ => None,
-        }
-    }
-
-    /// Whether typing the given character should open the slash menu: a `/`
-    /// at the start of an empty paragraph.
-    fn slash_trigger(block: &EditableBlock, text: Option<&str>) -> bool {
-        matches!(block.kind, BlockKind::Paragraph)
-            && block.content.text().is_empty()
-            && text == Some("/")
-    }
-
-    /// Maps a key press in a block's editor to a block-level behavior, falling
-    /// back to the default text editor binding.
-    ///
-    /// This is where Futo-style editing lives: typed markdown prefixes convert
-    /// the block, Enter splits and continues lists, Backspace at the start
-    /// merges or de-lists, and the arrow keys move the caret across blocks.
-    fn block_key_binding(
-        index: usize,
-        block: &EditableBlock,
-        blocks: &[EditableBlock],
-        key_press: text_editor::KeyPress,
-        slash_open: bool,
-    ) -> Option<text_editor::Binding<Message>> {
-        use cosmic::iced::keyboard::key::Named;
-        use cosmic::widget::text_editor::{Binding, Status};
-
-        // Only intercept keys while the editor is focused.
-        if !matches!(key_press.status, Status::Focused { .. }) {
-            return Binding::from_key_press(key_press);
-        }
-
-        // While the slash menu is open for this block, it owns the keyboard.
-        if slash_open {
-            return Self::slash_menu_binding(&key_press);
-        }
-
-        // Document-wide undo/redo: the editor's own Ctrl+Z only rewinds the
-        // focused block, so intercept it here (code blocks included, which
-        // would otherwise keep their per-block history).
-        if let Some(binding) = Self::undo_redo_binding(&key_press) {
-            return Some(binding);
-        }
-
-        // Code blocks keep their own newlines; dividers have no editor. In
-        // code, Tab inserts a literal tab.
-        if matches!(block.kind, BlockKind::Code(_) | BlockKind::Divider) {
-            if matches!(block.kind, BlockKind::Code(_))
-                && matches!(key_press.modified_key.as_ref(), Key::Named(Named::Tab))
-                && !key_press.modifiers.shift()
-            {
-                return Some(text_editor::Binding::Insert('\t'));
-            }
-            return Binding::from_key_press(key_press);
-        }
-
-        let cursor = block.content.cursor();
-        let position = cursor.position;
-
-        match key_press.modified_key.as_ref() {
-            Key::Named(Named::Enter) => Some(Self::enter_binding(index, block)),
-            Key::Named(Named::Backspace) => {
-                if position.line != 0 || position.column != 0 {
-                    // Not at the start of the block: default backspace.
-                    return Binding::from_key_press(key_press);
-                }
-                Self::backspace_binding(index, block, key_press)
-            }
-            Key::Named(Named::Tab) => {
-                let delta = if key_press.modifiers.shift() { -1 } else { 1 };
-                Some(Binding::Custom(Message::ChangeLevel { index, delta }))
-            }
-            Key::Named(Named::ArrowUp) if !key_press.modifiers.shift() => {
-                if position.line == 0
-                    && position.column == 0
-                    && Self::previous_editable(blocks, index).is_some()
-                {
-                    Some(Binding::Custom(Message::FocusPrevious(index)))
-                } else {
-                    Binding::from_key_press(key_press)
-                }
-            }
-            Key::Named(Named::ArrowDown) if !key_press.modifiers.shift() => {
-                let last_line = block.content.line_count().saturating_sub(1);
-                let end = block
-                    .content
-                    .line(last_line)
-                    .map_or(0, |line| line.text.len());
-                if position.line == last_line
-                    && position.column == end
-                    && Self::next_editable(blocks, index).is_some()
-                {
-                    Some(Binding::Custom(Message::FocusNext(index)))
-                } else {
-                    Binding::from_key_press(key_press)
-                }
-            }
-            Key::Character(" ")
-                if !key_press.modifiers.control()
-                    && !key_press.modifiers.alt()
-                    && !key_press.modifiers.shift() =>
-            {
-                // Space on a todo checkbox toggles it instead of inserting a
-                // space at the start of the content.
-                if editor::space_toggles_todo(
-                    &block.kind,
-                    position.line,
-                    position.column,
-                    block.content.cursor().selection.is_some(),
-                ) {
-                    Some(Binding::Custom(Message::ToggleTodo(index)))
-                } else {
-                    Binding::from_key_press(key_press)
-                }
-            }
-            _ if key_press.modifiers.control() && !key_press.modifiers.shift() => {
-                // Inline formatting shortcuts, matching common editors.
-                match key_press.modified_key.as_ref() {
-                    Key::Character("b") => Some(Binding::Custom(Message::WrapInline {
-                        index,
-                        marker: InlineMarker::Bold,
-                    })),
-                    Key::Character("i") => Some(Binding::Custom(Message::WrapInline {
-                        index,
-                        marker: InlineMarker::Italic,
-                    })),
-                    Key::Character("k") => Some(Binding::Custom(Message::WrapInline {
-                        index,
-                        marker: InlineMarker::Code,
-                    })),
-                    Key::Character("x") => Some(Binding::Custom(Message::WrapInline {
-                        index,
-                        marker: InlineMarker::Strikethrough,
-                    })),
-                    _ => Binding::from_key_press(key_press),
-                }
-            }
-            _ => Self::prefix_binding(index, block, &key_press)
-                .or_else(|| Binding::from_key_press(key_press)),
-        }
-    }
-
-    /// Shifts the nesting level of a structured block by `delta`, clamped to
-    /// `0..=6`. Returns `None` for kinds without a nesting level.
-    fn shift_level(kind: &BlockKind, delta: i8) -> Option<BlockKind> {
-        let level = kind.level().saturating_add_signed(delta).clamp(0, 6);
-        match kind {
-            BlockKind::Quote(_) => Some(BlockKind::Quote(level)),
-            BlockKind::Bullet(_) => Some(BlockKind::Bullet(level)),
-            BlockKind::Numbered(_, number) => Some(BlockKind::Numbered(level, *number)),
-            BlockKind::Todo(_, done) => Some(BlockKind::Todo(level, *done)),
-            BlockKind::Paragraph
-            | BlockKind::Heading(_)
-            | BlockKind::Code(_)
-            | BlockKind::Divider => None,
-        }
-    }
-
-    /// The binding for a typed character that may start a block conversion:
-    /// a space completing a markdown prefix, three backticks opening a code
-    /// fence, or a slash opening the command menu. Returns `None` for any
-    /// other input.
-    fn prefix_binding(
-        index: usize,
-        block: &EditableBlock,
-        key_press: &text_editor::KeyPress,
-    ) -> Option<text_editor::Binding<Message>> {
-        use cosmic::widget::text_editor::Binding;
-        if key_press.text.as_deref() == Some(" ") {
-            // A space may complete a typed markdown prefix.
-            if let Some(kind) = editor::prefix_kind(&block.content.text()) {
-                return Some(Binding::Custom(Message::ConvertBlock {
-                    index,
-                    kind,
-                    content: String::new(),
-                }));
-            }
-        } else if key_press.text.as_deref() == Some("`") && block.content.text() == "``" {
-            // Three backticks open a fenced code block.
-            return Some(Binding::Custom(Message::ConvertBlock {
-                index,
-                kind: BlockKind::Code(String::new()),
-                content: String::new(),
-            }));
-        } else if Self::slash_trigger(block, key_press.text.as_deref()) {
-            // A slash in an empty paragraph opens the command menu.
-            return Some(Binding::Custom(Message::SlashMenuOpen(index)));
-        }
-        None
-    }
-
-    /// The binding for Backspace at the very start of a block: un-nests a
-    /// nested item, removes the marker of a top-level item, or merges the
-    /// block into the previous one.
-    fn backspace_binding(
-        index: usize,
-        block: &EditableBlock,
-        key_press: text_editor::KeyPress,
-    ) -> Option<text_editor::Binding<Message>> {
-        use cosmic::widget::text_editor::Binding;
-        let level = block.kind.level();
-        match &block.kind {
-            BlockKind::Quote(_)
-            | BlockKind::Bullet(_)
-            | BlockKind::Numbered(..)
-            | BlockKind::Todo(..)
-                if level > 0 =>
-            {
-                // Nested item: backspace un-nests it.
-                Some(Binding::Custom(Message::ChangeLevel { index, delta: -1 }))
-            }
-            BlockKind::Quote(_)
-            | BlockKind::Bullet(_)
-            | BlockKind::Numbered(..)
-            | BlockKind::Todo(..) => {
-                // Top-level item: backspace removes the marker.
-                let text = block.content.text();
-                Some(Binding::Custom(Message::ConvertBlock {
-                    index,
-                    kind: BlockKind::Paragraph,
-                    content: text,
-                }))
-            }
-            _ if index > 0 => {
-                // At the very start: merge into the previous block.
-                Some(Binding::Custom(Message::MergeUp { index }))
-            }
-            _ => Binding::from_key_press(key_press),
-        }
-    }
-
-    /// The binding for the Enter key in a single-line block: the text after
-    /// the caret moves into a new block below, which continues list items and
-    /// quotes of the same kind. Entering an empty list item exits the list.
-    fn enter_binding(index: usize, block: &EditableBlock) -> text_editor::Binding<Message> {
-        use cosmic::widget::text_editor::Binding;
-        let cursor = block.content.cursor();
-        let text = block.content.text();
-        // Typing a divider marker (`---`, `***`, `___`) and pressing Enter
-        // inserts a divider and moves the caret below it.
-        if matches!(block.kind, BlockKind::Paragraph) && editor::is_divider(&text) {
-            return Binding::Custom(Message::InsertDivider(index));
-        }
-        let (before, after) = split_at(&text, cursor.position.column);
-        let continuation = match &block.kind {
-            BlockKind::Bullet(level) => Some(BlockKind::Bullet(*level)),
-            BlockKind::Numbered(level, number) => Some(BlockKind::Numbered(*level, *number)),
-            BlockKind::Todo(level, done) => Some(BlockKind::Todo(*level, *done)),
-            BlockKind::Quote(level) => Some(BlockKind::Quote(*level)),
-            BlockKind::Paragraph
-            | BlockKind::Heading(_)
-            | BlockKind::Code(_)
-            | BlockKind::Divider => None,
-        };
-        if let Some(kind) = continuation {
-            if before.is_empty() && after.is_empty() {
-                // An empty item: Enter exits the list.
-                return Binding::Custom(Message::ConvertBlock {
-                    index,
-                    kind: BlockKind::Paragraph,
-                    content: String::new(),
-                });
-            }
-            return Binding::Custom(Message::SplitBlock {
-                index,
-                kind,
-                before,
-                after,
-            });
-        }
-        // Heading or paragraph: split into a paragraph.
-        Binding::Custom(Message::SplitBlock {
-            index,
-            kind: BlockKind::Paragraph,
-            before,
-            after,
-        })
-    }
-
-    /// The cursor positioned at the end of the block's content.
-    fn end_cursor(content: &text_editor::Content) -> text_editor::Cursor {
-        let line = content.line_count().saturating_sub(1);
-        let column = content.line(line).map_or(0, |l| l.text.len());
-        text_editor::Cursor {
-            position: text_editor::Position { line, column },
-            selection: None,
-        }
-    }
-
-    /// The nearest editable block before `index`, skipping dividers.
-    fn previous_editable(blocks: &[EditableBlock], index: usize) -> Option<usize> {
-        (0..index)
-            .rev()
-            .find(|&i| !matches!(blocks[i].kind, BlockKind::Divider))
-    }
-
-    /// The nearest editable block after `index`, skipping dividers.
-    fn next_editable(blocks: &[EditableBlock], index: usize) -> Option<usize> {
-        (index + 1..blocks.len()).find(|&i| !matches!(blocks[i].kind, BlockKind::Divider))
-    }
-
-    /// A task that focuses the block editor with the given index.
-    fn focus_block(index: usize) -> cosmic::Task<Message> {
-        cosmic::iced::runtime::task::widget(
-            cosmic::iced::runtime::core::widget::operation::focusable::focus(
-                cosmic::widget::Id::new(format!("block-{index}")),
-            ),
-        )
-    }
-
-    /// A snapshot of a tab's whole document for undo/redo, rebuilt from its
-    /// editable blocks as pure model blocks.
-    fn snapshot_tab(tab: &Tab) -> Vec<editor::Block> {
-        tab.blocks.iter().map(EditableBlock::to_block).collect()
-    }
-
-    /// Splits a multi-line paste into blocks (Futo behavior): the text
-    /// before the caret stays in the block, each pasted line becomes its own
-    /// block, and the text after the caret continues in a new block. Returns
-    /// a focus task when the paste was handled here, skipping the editor's
-    /// default behavior. Code blocks and single-line pastes keep the default.
-    fn intercept_paste(
-        tab: &mut Tab,
-        index: usize,
-        action: &text_editor::Action,
-    ) -> Option<Task<cosmic::Action<Message>>> {
-        let text_editor::Action::Edit(text_editor::Edit::Paste(text)) = action else {
-            return None;
-        };
-        if !text.contains('\n') {
-            return None;
-        }
-        let block = tab.blocks.get(index)?;
-        if matches!(block.kind, BlockKind::Code(_) | BlockKind::Divider)
-            || block.content.text().contains('\n')
-        {
-            return None;
-        }
-        let cursor = block.content.cursor();
-        // An inline selection (or caret) within the single line.
-        let (start, end) = match cursor.selection {
-            Some(anchor) if anchor.line == cursor.position.line => (
-                anchor.column.min(cursor.position.column),
-                anchor.column.max(cursor.position.column),
-            ),
-            _ => (cursor.position.column, cursor.position.column),
-        };
-        let pasted = editor::parse_markdown(text);
-        if pasted.is_empty() {
-            return None;
-        }
-        let line = block.content.text();
-        let kind = block.kind.clone();
-        let (replacement, caret_in_replacement) = paste_blocks(kind, &line, start, end, pasted);
-        let caret = index + caret_in_replacement;
-        Self::push_undo_step(tab);
-        tab.blocks.splice(index..=index, replacement);
-        renumber_blocks(&mut tab.blocks);
-        tab.selected_block = caret;
-        if let Some(block) = tab.blocks.get_mut(caret) {
-            let cursor = Self::end_cursor(&block.content);
-            block.content.move_to(cursor);
-        }
-        tab.dirty = true;
-        Some(Self::focus_block(caret).map(cosmic::action::app))
-    }
-
-    /// Whether a new edit should start an undo step, given when the previous
-    /// one was recorded. Typing bursts in the same block collapse into one
-    /// step; anything else (time passing, another block) starts a new one.
-    fn should_snapshot(last: Option<(Instant, usize)>, now: Instant, index: usize) -> bool {
-        last.is_none_or(|(at, last_index)| {
-            now.duration_since(at) >= UNDO_COALESCE || last_index != index
-        })
-    }
-
-    /// Pushes a snapshot of the tab's current document and clears its redo
-    /// stack.
-    fn record_snapshot(tab: &mut Tab) {
-        tab.undo_stack.push(Self::snapshot_tab(tab));
-        if tab.undo_stack.len() > UNDO_LIMIT {
-            tab.undo_stack.remove(0);
-        }
-        tab.redo_stack.clear();
-    }
-
-    /// Records the tab's current document as an undo step before an edit in
-    /// the given block, coalescing bursts of typing into a single step.
-    fn push_undo(tab: &mut Tab, block_index: usize) {
-        let now = Instant::now();
-        if !Self::should_snapshot(tab.last_undo_at, now, block_index) {
-            return;
-        }
-        Self::record_snapshot(tab);
-        tab.last_undo_at = Some((now, block_index));
-    }
-
-    /// Records the tab's current document as its own undo step for a
-    /// structural change (split, convert, ...) and breaks the typing
-    /// coalescing window so the following keystrokes start a fresh step.
-    fn push_undo_step(tab: &mut Tab) {
-        Self::record_snapshot(tab);
-        tab.last_undo_at = None;
-    }
-
-    /// Replaces the tab's document with the given snapshot, places the caret
-    /// at the end of `selected_block` (clamped to the restored document), and
-    /// returns a task that refocuses the editor. The caller refreshes the
-    /// title.
-    fn restore_blocks(tab: &mut Tab, snapshot: Vec<editor::Block>) -> Task<cosmic::Action<Message>> {
-        tab.blocks = snapshot
-            .into_iter()
-            .map(EditableBlock::from_block)
-            .collect();
-        tab.last_undo_at = None;
-        let index = tab.selected_block.min(tab.blocks.len().saturating_sub(1));
-        tab.selected_block = index;
-        if let Some(block) = tab.blocks.get_mut(index) {
-            let cursor = Self::end_cursor(&block.content);
-            block.content.move_to(cursor);
-        }
-        tab.dirty = true;
-        Self::focus_block(index).map(cosmic::action::app)
-    }
-
-    /// Converts the block at `index` to `kind`, keeping its text (dividers
-    /// drop it), and returns a task that moves focus back into the document:
-    /// the converted block, or the next editable block after a divider
-    /// (inserting an empty paragraph when there is nowhere to type). The
-    /// caller refreshes the title.
-    fn format_block(tab: &mut Tab, index: usize, kind: BlockKind) -> Task<cosmic::Action<Message>> {
-        if tab
-            .blocks
-            .get(index)
-            .is_none_or(|block| block.kind == kind)
-        {
-            return Task::none();
-        }
-        Self::push_undo_step(tab);
-        let Some(block) = tab.blocks.get_mut(index) else {
-            return Task::none();
-        };
-        let is_divider = matches!(kind, BlockKind::Divider);
-        let text = block.content.text();
-        block.kind = kind;
-        block.content = text_editor::Content::with_text(if is_divider { "" } else { &text });
-        renumber_blocks(&mut tab.blocks);
-        tab.dirty = true;
-        if !is_divider {
-            return Self::focus_block(index).map(cosmic::action::app);
-        }
-        if let Some(next) = Self::next_editable(&tab.blocks, index) {
-            return Self::focus_block(next).map(cosmic::action::app);
-        }
-        let next = index + 1;
-        tab.blocks.insert(
-            next,
-            EditableBlock::from_block(editor::Block::paragraph("")),
-        );
-        Self::focus_block(next).map(cosmic::action::app)
     }
 
     /// Wraps content in a tooltip with the given text.
@@ -3211,227 +1870,5 @@ impl menu::action::MenuAction for NavMenuAction {
 
     fn message(&self) -> Self::Message {
         cosmic::Action::App(Message::NavMenuAction(*self))
-    }
-}
-
-/// The kind a block continues as when split by a paste: structured kinds
-/// keep their marker, plain kinds fall back to a paragraph.
-#[must_use]
-fn continuation_kind(kind: &BlockKind) -> BlockKind {
-    match kind {
-        BlockKind::Bullet(level) => BlockKind::Bullet(*level),
-        BlockKind::Numbered(level, number) => BlockKind::Numbered(*level, *number),
-        BlockKind::Todo(level, done) => BlockKind::Todo(*level, *done),
-        BlockKind::Quote(level) => BlockKind::Quote(*level),
-        BlockKind::Paragraph | BlockKind::Heading(_) | BlockKind::Code(_) | BlockKind::Divider => {
-            BlockKind::Paragraph
-        }
-    }
-}
-
-/// The blocks that replace a single-line block when `pasted` (already
-/// parsed) is inserted over the byte range `start..end` of `line`, plus the
-/// index within the replacement of the block that receives the caret.
-///
-/// The text before the range stays in the original block (keeping its
-/// kind), the pasted blocks follow it, and the text after the range becomes
-/// a continuation of the original kind. Pasting into an entirely empty
-/// block replaces it with the pasted blocks.
-#[must_use]
-fn paste_blocks(
-    kind: BlockKind,
-    line: &str,
-    start: usize,
-    end: usize,
-    pasted: Vec<editor::Block>,
-) -> (Vec<EditableBlock>, usize) {
-    let before = line[..start].to_owned();
-    let after = line[end..].to_owned();
-    if before.is_empty() && after.is_empty() {
-        let blocks: Vec<EditableBlock> =
-            pasted.into_iter().map(EditableBlock::from_block).collect();
-        let caret = blocks.len().saturating_sub(1);
-        return (blocks, caret);
-    }
-    let mut blocks = Vec::with_capacity(2 + pasted.len());
-    let continuation = continuation_kind(&kind);
-    blocks.push(EditableBlock {
-        kind,
-        content: text_editor::Content::with_text(&before),
-    });
-    // The caret lands at the end of the last pasted block, just before the
-    // continuation of the text that followed the caret.
-    let caret = blocks.len() + pasted.len() - 1;
-    blocks.extend(pasted.into_iter().map(EditableBlock::from_block));
-    blocks.push(EditableBlock {
-        kind: continuation,
-        content: text_editor::Content::with_text(&after),
-    });
-    (blocks, caret)
-}
-
-/// Re-numbers every consecutive run of ordered list items so each run
-/// starts at 1 and increments by one, matching how Futo displays lists.
-/// Runs are reset by any non-numbered block or a level change.
-fn renumber_blocks(blocks: &mut [EditableBlock]) {
-    let mut previous: Option<(u8, u32)> = None;
-    for block in blocks {
-        match &mut block.kind {
-            BlockKind::Numbered(level, number) => {
-                *number = match previous {
-                    Some((prev_level, prev_number)) if prev_level == *level => prev_number + 1,
-                    _ => 1,
-                };
-                previous = Some((*level, *number));
-            }
-            _ => previous = None,
-        }
-    }
-}
-
-/// Splits the text at the given byte offset, clamped down to a character
-/// boundary so multi-byte characters are never cut in half.
-#[must_use]
-fn split_at(text: &str, column: usize) -> (String, String) {
-    let boundary = text.floor_char_boundary(column);
-    (text[..boundary].to_owned(), text[boundary..].to_owned())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{AppModel, EditableBlock, UNDO_COALESCE, paste_blocks, renumber_blocks, split_at};
-    use crate::editor::{self, BlockKind};
-    use std::time::Instant;
-
-    #[test]
-    fn split_at_clamps_to_char_boundaries() {
-        assert_eq!(split_at("hello", 3), ("hel".to_owned(), "lo".to_owned()));
-        // The column is a byte offset: splitting inside a multi-byte char
-        // clamps down to the start of the char.
-        assert_eq!(split_at("héllo", 1), ("h".to_owned(), "éllo".to_owned()));
-        assert_eq!(split_at("héllo", 3), ("hé".to_owned(), "llo".to_owned()));
-        assert_eq!(split_at("hello", 99), ("hello".to_owned(), String::new()));
-        assert_eq!(split_at("", 0), (String::new(), String::new()));
-    }
-
-    #[test]
-    fn shift_level_clamps_nesting() {
-        assert_eq!(
-            AppModel::shift_level(&BlockKind::Bullet(1), 1),
-            Some(BlockKind::Bullet(2))
-        );
-        assert_eq!(
-            AppModel::shift_level(&BlockKind::Bullet(0), -1),
-            Some(BlockKind::Bullet(0))
-        );
-        assert_eq!(
-            AppModel::shift_level(&BlockKind::Bullet(5), 5),
-            Some(BlockKind::Bullet(6))
-        );
-        assert_eq!(
-            AppModel::shift_level(&BlockKind::Todo(2, true), 1),
-            Some(BlockKind::Todo(3, true))
-        );
-        assert_eq!(
-            AppModel::shift_level(&BlockKind::Numbered(1, 4), -1),
-            Some(BlockKind::Numbered(0, 4))
-        );
-        assert_eq!(
-            AppModel::shift_level(&BlockKind::Quote(0), 1),
-            Some(BlockKind::Quote(1))
-        );
-        assert_eq!(AppModel::shift_level(&BlockKind::Paragraph, 1), None);
-        assert_eq!(AppModel::shift_level(&BlockKind::Heading(2), 1), None);
-        assert_eq!(AppModel::shift_level(&BlockKind::Divider, 1), None);
-    }
-
-    #[test]
-    fn undo_coalesces_typing_in_one_block() {
-        let now = Instant::now();
-        // No previous snapshot: start a step.
-        assert!(AppModel::should_snapshot(None, now, 0));
-        // A recent snapshot in the same block coalesces.
-        assert!(!AppModel::should_snapshot(Some((now, 0)), now, 0));
-        // A recent snapshot in another block starts a new step.
-        assert!(AppModel::should_snapshot(Some((now, 0)), now, 1));
-        // Enough time passing starts a new step even in the same block.
-        assert!(AppModel::should_snapshot(
-            Some((now, 0)),
-            now + UNDO_COALESCE,
-            0
-        ));
-    }
-
-    #[test]
-    fn paste_blocks_splits_multi_line_paste() {
-        let pasted = vec![editor::Block::paragraph("X"), editor::Block::paragraph("Y")];
-        let (blocks, caret) = paste_blocks(BlockKind::Bullet(0), "ab", 1, 1, pasted);
-        let kinds: Vec<_> = blocks.iter().map(|b| b.kind.clone()).collect();
-        let text: Vec<_> = blocks.iter().map(|b| b.content.text()).collect();
-        assert_eq!(
-            kinds,
-            vec![
-                BlockKind::Bullet(0),
-                BlockKind::Paragraph,
-                BlockKind::Paragraph,
-                BlockKind::Bullet(0)
-            ]
-        );
-        assert_eq!(text, vec!["a", "X", "Y", "b"]);
-        // The caret lands at the end of the last pasted block.
-        assert_eq!(caret, 2);
-    }
-
-    #[test]
-    fn paste_blocks_replaces_empty_block_and_selection() {
-        // Pasting into an empty block replaces it with the pasted blocks.
-        let pasted = vec![editor::Block::paragraph("hello")];
-        let (blocks, caret) = paste_blocks(BlockKind::Todo(0, false), "", 0, 0, pasted);
-        assert_eq!(blocks[0].kind, BlockKind::Paragraph);
-        assert_eq!(caret, 0);
-        // Pasting over a selection drops the selected text.
-        let pasted = vec![editor::Block::paragraph("Z")];
-        let (blocks, caret) = paste_blocks(BlockKind::Bullet(1), "abcdef", 1, 4, pasted);
-        let text: Vec<_> = blocks.iter().map(|b| b.content.text()).collect();
-        assert_eq!(text, vec!["a", "Z", "ef"]);
-        assert_eq!(caret, 1);
-    }
-
-    #[test]
-    fn renumber_blocks_sequences_each_list_run() {
-        let mut blocks = vec![
-            EditableBlock::from_block(editor::Block::paragraph("intro")),
-            EditableBlock::from_block(editor::Block {
-                kind: BlockKind::Numbered(0, 7),
-                content: "a".to_owned(),
-            }),
-            EditableBlock::from_block(editor::Block {
-                kind: BlockKind::Numbered(0, 9),
-                content: "b".to_owned(),
-            }),
-            EditableBlock::from_block(editor::Block::paragraph("gap")),
-            EditableBlock::from_block(editor::Block {
-                kind: BlockKind::Numbered(1, 3),
-                content: "c".to_owned(),
-            }),
-            EditableBlock::from_block(editor::Block {
-                kind: BlockKind::Numbered(1, 5),
-                content: "d".to_owned(),
-            }),
-            EditableBlock::from_block(editor::Block {
-                kind: BlockKind::Numbered(0, 99),
-                content: "e".to_owned(),
-            }),
-        ];
-        renumber_blocks(&mut blocks);
-        let numbers: Vec<_> = blocks
-            .iter()
-            .map(|block| match &block.kind {
-                BlockKind::Numbered(_, number) => *number,
-                _ => 0,
-            })
-            .collect();
-        // Each run starts at 1; a level change resets the run.
-        assert_eq!(numbers, vec![0, 1, 2, 0, 1, 2, 1]);
     }
 }

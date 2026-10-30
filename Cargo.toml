@@ -7,6 +7,7 @@ description = "A notes application for the COSMIC desktop"
 repository = "https://github.com/nalladev/cosmic-notes"
 
 [dependencies]
+markion-core = { path = "crates/markion-core" }
 dirs = "6"
 i18n-embed = { version = "0.16", features = [
     "fluent-system",
@@ -26,10 +27,7 @@ features = [
     "about",
     # On app startup, focuses an existing instance if the app is already open
     "single-instance",
-    # Markdown widget (parsing + preview rendering)
-    "markdown",
-    # Syntax highlighting in the text editor
-    "highlighter",
+
     # Async runtime used by the toaster (auto-dismiss) and autosave tick
     "tokio",
     # QR code widget
