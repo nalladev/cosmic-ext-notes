@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use crate::config::Config;
-use crate::editor::{self, MarkdownFormat};
+use crate::editor;
 use crate::fl;
 use crate::notes::{Note, SaveOutcome, Tree, TreeNode, Vault};
 use crate::sidebar_area::SidebarMouseArea;
@@ -91,6 +91,15 @@ pub enum Message {
     TabNew,
     /// The title input changed.
     EditTitle(String),
+    /// Add a tag to the active note.
+    AddTag,
+    /// Edit the pending tag text.
+    EditTag(String),
+    /// Commit the pending tag.
+    CommitTag,
+
+    /// Remove a tag from the active note.
+    RemoveTag(String),
     /// Commit the current title as a rename.
     RenameSubmit,
     /// An action from a sidebar context menu.
@@ -173,11 +182,14 @@ struct Tab {
     editor: editor::Editor,
     saved_body: String,
     title_draft: String,
+    tags: Vec<String>,
+    tag_draft: String,
+    tag_editing: bool,
     dirty: bool,
 }
 
 impl Tab {
-    fn new(path: PathBuf, body: &str, title: &str) -> Self {
+    fn new(path: PathBuf, body: &str, title: &str, tags: &[String]) -> Self {
         let mut editor = editor::Editor::new(body);
         if let Some(parent) = path.parent() {
             editor.set_image_directory(parent);
@@ -187,17 +199,23 @@ impl Tab {
             editor,
             saved_body: body.to_owned(),
             title_draft: title.to_owned(),
+            tags: tags.to_vec(),
+            tag_draft: String::new(),
+            tag_editing: false,
             dirty: false,
         }
     }
 
-    fn load_body(&mut self, body: &str, title: &str) {
+    fn load_body(&mut self, body: &str, title: &str, tags: &[String]) {
         self.editor = editor::Editor::new(body);
         if let Some(parent) = self.path.as_ref().and_then(|path| path.parent()) {
             self.editor.set_image_directory(parent);
         }
         self.saved_body = body.to_owned();
         title.clone_into(&mut self.title_draft);
+        self.tags = tags.to_vec();
+        self.tag_draft.clear();
+        self.tag_editing = false;
         self.dirty = false;
     }
 
@@ -207,6 +225,9 @@ impl Tab {
             editor: editor::Editor::new(""),
             saved_body: String::new(),
             title_draft: String::new(),
+            tags: Vec::new(),
+            tag_draft: String::new(),
+            tag_editing: false,
             dirty: false,
         }
     }
@@ -495,7 +516,7 @@ impl cosmic::Application for AppModel {
             app.tab_model
                 .insert()
                 .text(title.clone())
-                .data::<Tab>(Tab::new(path, &body, &title))
+                .data::<Tab>(Tab::new(path, &body, &title, note.tags()))
                 .closable()
                 .activate();
         }
@@ -735,6 +756,35 @@ impl cosmic::Application for AppModel {
                 self.update_title()
             }
 
+            Message::AddTag => {
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.tag_editing = true;
+                    tab.tag_draft.clear();
+                }
+                Task::none()
+            }
+
+            Message::EditTag(value) => {
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.tag_draft = value;
+                }
+                Task::none()
+            }
+
+            Message::CommitTag => {
+                self.commit_tag();
+                Task::none()
+            }
+
+
+            Message::RemoveTag(tag) => {
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.tags.retain(|existing| existing != &tag);
+                    tab.dirty = true;
+                }
+                Task::none()
+            }
+
             Message::NavMenuAction(action) => {
                 // Every sidebar menu action dismisses the empty-area menu.
                 self.sidebar_context_menu_point = None;
@@ -885,11 +935,11 @@ impl AppModel {
     }
 
     /// Inserts a new tab for the note at `path` and makes it active.
-    fn new_tab(&mut self, path: &Path, body: &str, title: &str) {
+    fn new_tab(&mut self, path: &Path, body: &str, title: &str, tags: &[String]) {
         self.tab_model
             .insert()
             .text(title.to_owned())
-            .data::<Tab>(Tab::new(path.to_path_buf(), body, title))
+            .data::<Tab>(Tab::new(path.to_path_buf(), body, title, tags))
             .closable()
             .activate();
         self.persist_tabs();
@@ -930,9 +980,10 @@ impl AppModel {
             };
             let body = note.body().to_owned();
             let title = note.title().to_owned();
+            let tags = note.tags().to_vec();
             if let Some(tab) = self.active_tab_mut() {
                 tab.path = Some(path.to_path_buf());
-                tab.load_body(&body, &title);
+                tab.load_body(&body, &title, &tags);
             }
             let entity = self.tab_model.active();
             self.tab_model.text_set(entity, title);
@@ -946,7 +997,8 @@ impl AppModel {
         };
         let body = note.body().to_owned();
         let title = note.title().to_owned();
-        self.new_tab(path, &body, &title);
+        let tags = note.tags().to_vec();
+        self.new_tab(path, &body, &title, &tags);
         self.rebuild_nav_model();
         Task::batch([save, self.update_title()])
     }
@@ -1049,7 +1101,7 @@ impl AppModel {
                 let path = note.path().to_path_buf();
                 let body = note.body().to_owned();
                 let title = note.title().to_owned();
-                self.new_tab(&path, &body, &title);
+                self.new_tab(&path, &body, &title, note.tags());
                 self.rebuild_nav_model();
                 let focus =
                     text_input::focus(cosmic::widget::Id::new(TITLE_ID)).map(cosmic::action::app);
@@ -1081,8 +1133,9 @@ impl AppModel {
                 let path = note.path().to_path_buf();
                 let body = note.body().to_owned();
                 let title = note.title().to_owned();
+                let tags = note.tags().to_vec();
                 self.expanded.insert(parent);
-                self.new_tab(&path, &body, &title);
+                self.new_tab(&path, &body, &title, &tags);
                 self.rebuild_nav_model();
                 let focus =
                     text_input::focus(cosmic::widget::Id::new(TITLE_ID)).map(cosmic::action::app);
@@ -1114,7 +1167,8 @@ impl AppModel {
             return Task::none();
         };
         let body = Self::editor_text(tab);
-        match self.vault.save(&path, &body) {
+        let tags = tab.tags.clone();
+        match self.vault.save_with_tags(&path, &body, &tags) {
             Ok(Some(SaveOutcome::Saved)) => {
                 if let Some(tab) = self.active_tab_mut() {
                     tab.saved_body = body.clone();
@@ -1138,14 +1192,20 @@ impl AppModel {
                             .notes()
                             .iter()
                             .find(|note| note.path() == tab_path)
-                            .map(|note| (note.body().to_owned(), note.title().to_owned())),
+                            .map(|note| {
+                                                            (
+                                                                note.body().to_owned(),
+                                                                note.title().to_owned(),
+                                                                note.tags().to_vec(),
+                                                            )
+                                                        }),
                         None => None,
                     }
                 };
                 if let Some(tab) = self.active_tab_mut() {
                     tab.dirty = false;
-                    if let Some((body, title)) = reload {
-                        tab.load_body(&body, &title);
+                    if let Some((body, title, tags)) = reload {
+                        tab.load_body(&body, &title, &tags);
                     }
                 }
                 let name = conflict
@@ -1168,6 +1228,22 @@ impl AppModel {
                 self.toast(fl!("save-error"))
             }
         }
+    }
+
+    fn commit_tag(&mut self) {
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+        let tag = tab.tag_draft.trim().trim_start_matches('#').trim();
+        if !tag.is_empty()
+            && !tab.tags.iter().any(|existing| existing.eq_ignore_ascii_case(tag))
+        {
+            tab.tags.push(tag.to_owned());
+            tab.tags.sort_unstable_by_key(|value| value.to_lowercase());
+            tab.dirty = true;
+        }
+        tab.tag_draft.clear();
+        tab.tag_editing = false;
     }
 
     /// Commits the title draft as a rename, if it changed.
@@ -1479,7 +1555,7 @@ impl AppModel {
     const EDITOR_MAX_WIDTH: f32 = 718.0;
 
     /// Space between the tab bar and the note content.
-    const EDITOR_TOP_PADDING: f32 = 76.0;
+    const EDITOR_TOP_PADDING: f32 = 24.0;
 
     /// The editor for the active tab: the tab bar, title input, toolbar, and
     /// block editor. Shows the empty state when there are no tabs or when the
@@ -1503,13 +1579,24 @@ impl AppModel {
             .id(cosmic::widget::Id::new(TITLE_ID))
             .on_input(Message::EditTitle)
             .on_submit(|_| Message::RenameSubmit)
+            .style(cosmic::theme::TextInput::EditableText)
+            .size(26)
+            .padding([4, 0])
             .width(Length::Fill);
 
-        let mut content = widget::column::with_capacity(4)
-            .push(widget::container(title_input).padding([spacing.space_s, spacing.space_s]))
-            .push(divider::horizontal::default())
-            .push(self.block_toolbar())
-            .push(self.block_editor());
+        let mut content = widget::column::with_capacity(3)
+            .push(widget::container(title_input).padding([
+                spacing.space_s,
+                spacing.space_s,
+                0,
+                spacing.space_s,
+            ]))
+            .push(self.tag_row())
+            .push(
+                widget::container(self.block_editor())
+                    .width(Length::Fill)
+                    .padding([spacing.space_s, 36, 0, 36]),
+            );
         if let Some(panel) = self.backlinks_panel() {
             content = content.push(divider::horizontal::default()).push(panel);
         }
@@ -1574,6 +1661,51 @@ impl AppModel {
         )
     }
 
+    fn tag_row(&self) -> Element<'_, Message> {
+        let Some(tab) = self.active_tab() else {
+            return widget::space().into();
+        };
+        let mut row = widget::row::with_capacity(tab.tags.len() + 1)
+            .spacing(cosmic::theme::spacing().space_xxs)
+            .align_y(Alignment::Center);
+        for tag in &tab.tags {
+            let chip = widget::row::with_capacity(2)
+                .spacing(2)
+                .align_y(Alignment::Center)
+                .push(widget::text::caption(tag.clone()))
+                .push(
+                    button::icon(icon::from_name("window-close-symbolic").handle())
+                        .on_press(Message::RemoveTag(tag.clone()))
+                        .class(cosmic::theme::Button::Icon)
+                        .padding(0),
+                );
+            row = row.push(
+                widget::container(chip)
+                    .padding([2, 6])
+                    .class(cosmic::theme::Container::Secondary),
+            );
+        }
+        if tab.tag_editing {
+            row = row.push(
+                text_input::inline_input("Tag", &tab.tag_draft)
+                    .on_input(Message::EditTag)
+                    .on_submit(|_| Message::CommitTag)
+                    .size(13)
+                    .width(Length::Fixed(120.0)),
+            );
+        } else {
+            row = row.push(
+                button::text("+ Tag")
+                    .on_press(Message::AddTag)
+                    .class(cosmic::theme::Button::Text),
+            );
+        }
+        widget::container(row)
+            .padding([0, cosmic::theme::spacing().space_s, cosmic::theme::spacing().space_xxs, cosmic::theme::spacing().space_s])
+            .width(Length::Fill)
+            .into()
+    }
+
     fn block_editor(&self) -> Element<'_, Message> {
         match self.active_tab() {
             Some(tab) => tab.editor.view().map(Message::Editor),
@@ -1581,7 +1713,7 @@ impl AppModel {
         }
     }
 
-    /// Commands act on the canonical selection, including cross-block selections.
+    /* REMOVED persistent formatting toolbar
     fn block_toolbar(&self) -> Element<'_, Message> {
         let spacing = cosmic::theme::spacing();
         let mut row = widget::row::with_capacity(18).spacing(spacing.space_xxs);
@@ -1676,7 +1808,12 @@ impl AppModel {
             ));
         widget::container(row)
             .width(Length::Fill)
-            .padding([spacing.space_xxs, spacing.space_s])
+            .padding([
+                            0.0,
+                            f32::from(spacing.space_s),
+                            f32::from(spacing.space_xxs),
+                            f32::from(spacing.space_s),
+                        ])
             .into()
     }
 
@@ -1737,6 +1874,8 @@ impl AppModel {
             _ => icon::from_name(name).handle(),
         }
     }
+
+    */
 
     /// Wraps content in a tooltip with the given text.
     fn tooltip(content: Element<'static, Message>, text: String) -> Element<'static, Message> {

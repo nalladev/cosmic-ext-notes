@@ -58,7 +58,7 @@ fn construction_preserves_authored_bytes_and_renders_inline_styles() {
     );
     assert!(editor.surface.projection.spans.iter().any(|s| s.style.code));
     assert!(editor.surface.projection.spans.iter().any(|s| s.link));
-    assert_eq!(editor.surface.rows[0].cells[0].presentation.size, 30.0);
+    assert_eq!(editor.surface.rows[0].cells[0].presentation.size, 27.0);
 }
 
 #[test]

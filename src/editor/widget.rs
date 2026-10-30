@@ -250,7 +250,7 @@ impl Widget<Message, Theme, Renderer> for VisualEditor<'_> {
                             content: cell.marker.clone(),
                             bounds: Size::new(27.0, cell.size * 1.4),
                             size: Pixels(cell.size),
-                            line_height: text::LineHeight::Relative(1.4),
+                            line_height: text::LineHeight::Relative(1.32),
                             font: renderer.default_font(),
                             align_x: text::Alignment::Default,
                             align_y: alignment::Vertical::Top,
@@ -295,7 +295,7 @@ impl Widget<Message, Theme, Renderer> for VisualEditor<'_> {
                                     bounds,
                                     ..renderer::Quad::default()
                                 },
-                                Color::from_rgb(0.95, 0.75, 0.15).scale_alpha(0.23),
+                                defaults.text_color.scale_alpha(0.12),
                             );
                         }
                         for y in [
@@ -481,19 +481,19 @@ fn layout_surface(
     }
     if state.cache.as_ref() != Some(&key) {
         state.cells.clear();
-        let mut y = 12.0;
+        let mut y = 18.0;
         for row in &editor.surface.rows {
             let count = row.cells.len().max(1);
-            let column_width = (width - 32.0) / count as f32;
+            let column_width = (width - 48.0) / count as f32;
             let mut height: f32 = 0.0;
             let row_start = state.cells.len();
             for (column, cell) in row.cells.iter().enumerate() {
                 let p = &cell.presentation;
-                let x = 16.0 + column as f32 * column_width;
+                let x = 24.0 + column as f32 * column_width;
                 let inset = if p.table {
                     9.0
                 } else {
-                    p.indent as f32 * 22.0
+                    p.indent as f32 * 20.0
                         + if p.marker.is_empty() && !p.quote {
                             0.0
                         } else {
@@ -517,7 +517,7 @@ fn layout_surface(
                     content: &spans,
                     bounds: Size::new(available, f32::INFINITY),
                     size: Pixels(p.size),
-                    line_height: text::LineHeight::Relative(1.4),
+                    line_height: text::LineHeight::Relative(1.32),
                     font: base_font,
                     align_x: text::Alignment::Default,
                     align_y: alignment::Vertical::Top,
@@ -530,7 +530,7 @@ fn layout_surface(
                     + if p.table || p.code || p.source {
                         14.0
                     } else {
-                        3.0
+                        7.0
                     };
                 height = height.max(cell_height);
                 state.cells.push(LaidCell {

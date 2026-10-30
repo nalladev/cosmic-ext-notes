@@ -33,6 +33,10 @@ pub struct Note {
     created: Option<String>,
     /// Whether the note should open in preview mode.
     preview: bool,
+    /// User-assigned tags stored in frontmatter.
+    tags: Vec<String>,
+    /// Unrecognized frontmatter lines preserved across saves.
+    extra_frontmatter: Vec<String>,
     /// Last modification time of the file, if known.
     modified: Option<SystemTime>,
     /// The full text of the file as it was loaded from disk.
@@ -65,6 +69,12 @@ impl Note {
     #[must_use]
     pub fn preview(&self) -> bool {
         self.preview
+    }
+
+    /// Tags assigned to the note.
+    #[must_use]
+    pub fn tags(&self) -> &[String] {
+        &self.tags
     }
 
     /// Last modification time of the file, if known.
@@ -109,6 +119,8 @@ impl Note {
         if let Some(created) = &self.created {
             frontmatter.set_created(created.clone());
         }
+        frontmatter.set_tags(self.tags.clone());
+        frontmatter.extra = self.extra_frontmatter.clone();
         frontmatter.render() + &self.body
     }
 
@@ -127,6 +139,8 @@ impl Note {
             pinned: frontmatter.pinned(),
             created: frontmatter.created().map(str::to_owned),
             preview: frontmatter.preview(),
+            tags: frontmatter.tags().to_vec(),
+            extra_frontmatter: frontmatter.extra.clone(),
             modified,
             loaded: text,
             body,
@@ -144,6 +158,8 @@ impl Note {
         self.pinned = frontmatter.pinned();
         self.created = frontmatter.created().map(str::to_owned);
         self.preview = frontmatter.preview();
+        self.tags = frontmatter.tags().to_vec();
+        self.extra_frontmatter = frontmatter.extra.clone();
         self.modified = fs::metadata(&self.path)
             .and_then(|meta| meta.modified())
             .ok();
@@ -277,11 +293,27 @@ impl Vault {
     ///
     /// Returns an error if the note file cannot be read or written.
     pub fn save(&mut self, id: &Path, body: &str) -> io::Result<Option<SaveOutcome>> {
+        let tags = self
+            .notes
+            .iter()
+            .find(|note| note.path == id)
+            .map_or_else(Vec::new, |note| note.tags.clone());
+        self.save_with_tags(id, body, &tags)
+    }
+
+    /// Saves the body and tags while preserving all other frontmatter.
+    pub fn save_with_tags(
+        &mut self,
+        id: &Path,
+        body: &str,
+        tags: &[String],
+    ) -> io::Result<Option<SaveOutcome>> {
         let Some(index) = self.notes.iter().position(|note| note.path == id) else {
             return Ok(None);
         };
         let note = &mut self.notes[index];
         body.clone_into(&mut note.body);
+        note.tags = tags.to_vec();
         let new_text = note.full_text();
 
         let disk_text = fs::read_to_string(&note.path)?;
@@ -771,6 +803,8 @@ struct Frontmatter {
     created: Option<String>,
     /// Whether the note should open in preview mode.
     preview: Option<bool>,
+    /// Tags assigned to the note.
+    tags: Vec<String>,
     /// Lines that are not recognized key/value pairs, preserved verbatim.
     extra: Vec<String>,
 }
@@ -811,6 +845,14 @@ impl Frontmatter {
         self.preview = Some(preview);
     }
 
+    fn tags(&self) -> &[String] {
+        &self.tags
+    }
+
+    fn set_tags(&mut self, tags: Vec<String>) {
+        self.tags = tags;
+    }
+
     /// Parses a frontmatter block from the start of `text`. Returns the parsed
     /// frontmatter and the body (everything after the closing `---` line).
     /// If the text does not start with a well-formed frontmatter block, an empty
@@ -831,6 +873,14 @@ impl Frontmatter {
                     "pinned" => frontmatter.pinned = Some(value.trim() == "true"),
                     "created" => frontmatter.created = Some(unquote(value.trim())),
                     "preview" => frontmatter.preview = Some(value.trim() == "true"),
+                    "tags" => {
+                        frontmatter.tags = value
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|tag| !tag.is_empty())
+                            .map(unquote)
+                            .collect();
+                    }
                     _ => frontmatter.extra.push(line.to_owned()),
                 }
             } else {
@@ -850,6 +900,9 @@ impl Frontmatter {
             writeln!(out, "created: {created}").expect("write to string");
         }
         writeln!(out, "preview: {}", self.preview.unwrap_or(false)).expect("write to string");
+        if !self.tags.is_empty() {
+            writeln!(out, "tags: {}", self.tags.join(", ")).expect("write to string");
+        }
         for line in &self.extra {
             out.push_str(line);
             out.push('\n');

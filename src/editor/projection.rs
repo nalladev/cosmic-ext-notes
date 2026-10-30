@@ -57,14 +57,14 @@ impl Surface {
         };
         for block in document.visual_blocks_shared().iter() {
             let mut presentation = Presentation {
-                size: 16.0,
+                size: 15.0,
                 quote: block.quote_context.is_some(),
                 indent: block.list_depth.saturating_sub(1),
                 ..Presentation::default()
             };
             match &block.kind {
                 VisualBlockKind::Heading { level } => {
-                    presentation.size = [30.0, 26.0, 23.0, 20.0, 18.0, 17.0]
+                    presentation.size = [27.0, 23.0, 20.0, 18.0, 17.0, 16.0]
                         [usize::from(level.saturating_sub(1)).min(5)];
                     presentation.bold = true;
                 }
@@ -212,7 +212,7 @@ impl Surface {
             surface.append_lines(
                 identity(source, 0..source.len(), false),
                 Presentation {
-                    size: 16.0,
+                    size: 15.0,
                     ..Presentation::default()
                 },
             );
