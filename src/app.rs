@@ -1773,7 +1773,7 @@ impl AppModel {
             row = row.push(widget::text::body(format!("#{}", tag)).class(link_color));
         }
         widget::container(row)
-            .padding([0, 44, spacing.space_xxs, 44])
+            .padding([0, 44, 0, 68])
             .width(Length::Fill)
             .into()
     }
