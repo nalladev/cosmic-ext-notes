@@ -501,7 +501,7 @@ fn layout_surface(
     }
     if state.cache.as_ref() != Some(&key) {
         state.cells.clear();
-        let mut y = 14.0;
+        let mut y = 4.0;
         for row in &editor.surface.rows {
             let count = row.cells.len().max(1);
             let column_width = (width - 48.0) / count as f32;

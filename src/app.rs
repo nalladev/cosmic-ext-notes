@@ -1608,10 +1608,10 @@ impl AppModel {
                 weight: cosmic::iced::font::Weight::Semibold,
                 ..Default::default()
             })
-            .padding([2, 0])
+            .padding([0, 0])
             .width(Length::Fill);
 
-        let mut content = widget::column::with_capacity(3)
+        let mut content = widget::column::with_capacity(4)
             .push(widget::container(title_input).padding([
                 spacing.space_s,
                 spacing.space_s,
@@ -1619,10 +1619,11 @@ impl AppModel {
                 spacing.space_s,
             ]))
             .push(self.tag_row())
+            .push(self.tag_line())
             .push(
                 widget::container(self.block_editor())
                     .width(Length::Fill)
-                    .padding([spacing.space_xxs, 44, 0, 44]),
+                    .padding([0, 44, 0, 44]),
             );
         if let Some(panel) = self.backlinks_panel() {
             content = content.push(divider::horizontal::default()).push(panel);
@@ -1752,6 +1753,27 @@ impl AppModel {
                 cosmic::theme::spacing().space_xxs,
                 cosmic::theme::spacing().space_s,
             ])
+            .width(Length::Fill)
+            .into()
+    }
+
+    fn tag_line(&self) -> Element<'_, Message> {
+        let Some(tab) = self.active_tab() else {
+            return widget::space().into();
+        };
+        if tab.tags.is_empty() {
+            return widget::space().into();
+        }
+        let link_color = self.editor_link_color;
+        let spacing = cosmic::theme::spacing();
+        let mut row = widget::row::with_capacity(tab.tags.len())
+            .spacing(spacing.space_xxs)
+            .align_y(Alignment::Center);
+        for tag in &tab.tags {
+            row = row.push(widget::text::body(format!("#{}", tag)).class(link_color));
+        }
+        widget::container(row)
+            .padding([0, 44, spacing.space_xxs, 44])
             .width(Length::Fill)
             .into()
     }
