@@ -392,6 +392,26 @@ impl<'a> From<VisualEditor<'a>> for cosmic::Element<'a, Message> {
     }
 }
 
+fn header_tag_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
+    let tokens: Vec<_> = line.split_whitespace().collect();
+    if tokens.is_empty()
+        || !tokens
+            .iter()
+            .all(|token| token.starts_with('#') && token.len() > 1)
+    {
+        return Vec::new();
+    }
+
+    let mut ranges = Vec::with_capacity(tokens.len());
+    let mut offset = 0;
+    for token in tokens {
+        let start = line[offset..].find(token).expect("split token is in line") + offset;
+        ranges.push(start..start + token.len());
+        offset = start + token.len();
+    }
+    ranges
+}
+
 fn spans<'a>(
     editor: &'a Editor,
     cell: &projection::Cell,
@@ -404,6 +424,19 @@ fn spans<'a>(
         if span.display_range.start < range.end && span.display_range.end > range.start {
             boundaries.push(span.display_range.start.max(range.start));
             boundaries.push(span.display_range.end.min(range.end));
+        }
+    }
+    let first_line_end = editor
+        .surface
+        .projection
+        .text
+        .find('\n')
+        .unwrap_or(editor.surface.projection.text.len());
+    let header_tags = header_tag_ranges(&editor.surface.projection.text[..first_line_end]);
+    for tag in &header_tags {
+        if tag.start < range.end && tag.end > range.start {
+            boundaries.push(tag.start.max(range.start));
+            boundaries.push(tag.end.min(range.end));
         }
     }
     boundaries.sort_unstable();
@@ -422,6 +455,9 @@ fn spans<'a>(
         let style = highlight.map(|s| s.style).unwrap_or_default();
         let raw = cell.presentation.source || highlight.is_some_and(|s| s.source);
         let link = highlight.is_some_and(|s| s.link);
+        let tag = header_tags
+            .iter()
+            .any(|tag| tag.start <= start && tag.end >= end);
         let font = Font {
             family: if style.code || raw || cell.presentation.code {
                 font::Family::Monospace
@@ -441,7 +477,7 @@ fn spans<'a>(
             ..base_font
         };
         let mut span = text::Span::new(&editor.surface.projection.text[start..end]).font(font);
-        if link {
+        if link || tag {
             span.color = Some(link_color);
         }
         if !link {

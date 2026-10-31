@@ -1,2 +1,2 @@
 # Todo
- - Show pinned section in sidebar 
+ - Save check state for checkboxes.

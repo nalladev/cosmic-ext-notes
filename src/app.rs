@@ -170,6 +170,7 @@ enum NavEntry {
     Folder(PathBuf),
     Note(PathBuf),
     PinnedHeader,
+    PinnedSeparator,
 }
 
 /// The open sidebar dialog: creates or renames a folder.
@@ -306,7 +307,7 @@ impl cosmic::Application for AppModel {
                 Task::none()
             }
             Some(NavEntry::Note(path)) => self.open_tab(&path, false),
-            Some(NavEntry::PinnedHeader) | None => Task::none(),
+            Some(NavEntry::PinnedHeader | NavEntry::PinnedSeparator) | None => Task::none(),
         }
     }
 
@@ -437,7 +438,7 @@ impl cosmic::Application for AppModel {
                             NavMenuAction::DeleteItem(entity),
                         ));
                     }
-                    Some(NavEntry::PinnedHeader) | None => {}
+                    Some(NavEntry::PinnedHeader | NavEntry::PinnedSeparator) | None => {}
                 }
                 items
             })
@@ -1458,15 +1459,25 @@ impl AppModel {
         let selected = self.active_tab().and_then(|tab| tab.path.clone());
         let mut model = nav_bar::Model::default();
         let pinned = self.vault.pinned_notes();
-        if !pinned.is_empty() {
-            model.insert().text("Pinned").data(NavEntry::PinnedHeader);
+        let has_pinned = !pinned.is_empty();
+        if has_pinned {
+            model
+                .insert()
+                .icon(icon::from_name("pin-symbolic"))
+                .text("Pinned")
+                .data(NavEntry::PinnedHeader);
             for note in pinned {
                 model
                     .insert()
-                    .indent(1)
+                    .indent(2)
                     .text(note.title().to_owned())
                     .data(NavEntry::Note(note.path().to_path_buf()));
             }
+            model
+                .insert()
+                .indent(1)
+                .text("────────────────────────")
+                .data(NavEntry::PinnedSeparator);
         }
         Self::append_nav_nodes(
             &mut model,
@@ -1474,7 +1485,7 @@ impl AppModel {
             self.vault.tree().root(),
             &self.expanded,
             selected.as_deref(),
-            0,
+            if has_pinned { 1 } else { 0 },
         );
         self.nav_model = model;
     }
@@ -1656,7 +1667,7 @@ impl AppModel {
                     Task::none()
                 }
             },
-            NavEntry::PinnedHeader => Task::none(),
+            NavEntry::PinnedHeader | NavEntry::PinnedSeparator => Task::none(),
             NavEntry::Folder(path) => match self.vault.delete_folder(&path) {
                 Ok(_) => {
                     self.expanded
@@ -1783,7 +1794,7 @@ impl AppModel {
             .padding([0, 0])
             .width(Length::Fill);
 
-        let mut content = widget::column::with_capacity(4)
+        let mut content = widget::column::with_capacity(3)
             .push(widget::container(title_input).padding([
                 spacing.space_s,
                 spacing.space_s,
@@ -1791,7 +1802,6 @@ impl AppModel {
                 spacing.space_s,
             ]))
             .push(self.tag_row())
-            .push(self.tag_line())
             .push(
                 widget::container(self.block_editor())
                     .width(Length::Fill)
@@ -1927,27 +1937,6 @@ impl AppModel {
                 cosmic::theme::spacing().space_xxs,
                 cosmic::theme::spacing().space_s,
             ])
-            .width(Length::Fill)
-            .into()
-    }
-
-    fn tag_line(&self) -> Element<'_, Message> {
-        let Some(tab) = self.active_tab() else {
-            return widget::space().into();
-        };
-        if tab.tags.is_empty() {
-            return widget::space().into();
-        }
-        let link_color = self.editor_link_color;
-        let spacing = cosmic::theme::spacing();
-        let mut row = widget::row::with_capacity(tab.tags.len())
-            .spacing(spacing.space_xxs)
-            .align_y(Alignment::Center);
-        for tag in &tab.tags {
-            row = row.push(widget::text::body(format!("#{}", tag)).class(link_color));
-        }
-        widget::container(row)
-            .padding([0, 44, 0, 68])
             .width(Length::Fill)
             .into()
     }
