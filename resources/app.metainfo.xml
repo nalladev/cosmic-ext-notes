@@ -1,29 +1,29 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>io.github.nalladev.cosmic-notes</id>
+  <id>io.github.nalladev.cosmic-ext-notes</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MPL-2.0</project_license>
-  <name>Cosmic Notes</name>
+  <name>Notes</name>
   <developer id="io.github.nalladev">
     <name>Joel</name>
     <url type="homepage">https://github.com/nalladev</url>
   </developer>
-  <summary>A notes application for the COSMIC desktop</summary>
+  <summary>A notes application for the COSMIC™ desktop</summary>
   <description>
     <p>
-      Cosmic Notes is a notes application for the COSMIC desktop.
+      Notes is a notes application for the COSMIC desktop.
       Write, organise, and quickly find your notes with a native,
       keyboard-friendly experience.
     </p>
   </description>
-  <icon type="stock">io.github.nalladev.cosmic-notes</icon>
-  <url type="homepage">https://github.com/nalladev/cosmic-notes</url>
-  <url type="bugtracker">https://github.com/nalladev/cosmic-notes/issues</url>
-  <url type="vcs-browser">https://github.com/nalladev/cosmic-notes</url>
-  <launchable type="desktop-id">io.github.nalladev.cosmic-notes.desktop</launchable>
+  <icon type="stock">io.github.nalladev.cosmic-ext-notes</icon>
+  <url type="homepage">https://github.com/nalladev/cosmic-ext-notes</url>
+  <url type="bugtracker">https://github.com/nalladev/cosmic-ext-notes/issues</url>
+  <url type="vcs-browser">https://github.com/nalladev/cosmic-ext-notes</url>
+  <launchable type="desktop-id">io.github.nalladev.cosmic-ext-notes.desktop</launchable>
   <provides>
     <id>com.system76.CosmicApplication</id>
-    <binary>cosmic-notes</binary>
+    <binary>cosmic-ext-notes</binary>
   </provides>
   <requires>
     <display_length compare="ge">360</display_length>
@@ -42,11 +42,17 @@
   </keywords>
   <content_rating type="oars-1.1" />
 <releases>
+  <release version="0.1.1" date="2026-10-31">
+    <description>
+      <p>Trademark compliance fixes</p>
+    </description>
+    <url type="details">https://github.com/nalladev/cosmic-ext-notes/releases/tag/v0.1.1</url>
+  </release>
   <release version="0.1.0" date="2026-08-07">
     <description>
       <p>Initial release</p>
     </description>
-    <url type="details">https://github.com/nalladev/cosmic-notes/releases/tag/v0.1.0</url>
+    <url type="details">https://github.com/nalladev/cosmic-ext-notes/releases/tag/v0.1.0</url>
   </release>
 </releases>
 </component>

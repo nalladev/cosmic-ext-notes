@@ -1,10 +1,10 @@
 [package]
-name = "cosmic-notes"
-version = "0.1.0"
+name = "cosmic-ext-notes"
+version = "0.1.1"
 edition = "2024"
 license = "MPL-2.0"
-description = "A notes application for the COSMIC desktop"
-repository = "https://github.com/nalladev/cosmic-notes"
+description = "A notes application for the COSMIC™ desktop"
+repository = "https://github.com/nalladev/cosmic-ext-notes"
 
 [dependencies]
 markion-core = { path = "crates/markion-core" }
@@ -52,19 +52,19 @@ wayland = ["libcosmic/wayland"]
 [package.metadata.deb]
 license-file = "LICENSE"
 assets = [
-  ["target/release/cosmic-notes", "usr/bin/", "755"],
-  ["resources/app.desktop", "usr/share/applications/io.github.nalladev.cosmic-notes.desktop", "644"],
-  ["resources/app.metainfo.xml", "usr/share/appdata/io.github.nalladev.cosmic-notes.metainfo.xml", "644"],
-  ["resources/icon.svg", "usr/share/icons/hicolor/scalable/apps/io.github.nalladev.cosmic-notes.svg", "644"],
+  ["target/release/cosmic-ext-notes", "usr/bin/", "755"],
+  ["resources/app.desktop", "usr/share/applications/io.github.nalladev.cosmic-ext-notes.desktop", "644"],
+  ["resources/app.metainfo.xml", "usr/share/appdata/io.github.nalladev.cosmic-ext-notes.metainfo.xml", "644"],
+  ["resources/icon.svg", "usr/share/icons/hicolor/scalable/apps/io.github.nalladev.cosmic-ext-notes.svg", "644"],
 
 ]
 
 [package.metadata.generate-rpm]
 assets = [
-  { source = "target/release/cosmic-notes", dest = "/usr/bin/cosmic-notes", mode = "755" },
-  { source = "LICENSE", dest = "/usr/share/doc/cosmic-notes/LICENSE", doc = true, mode = "644" },
-  { source = "resources/app.desktop", dest = "/usr/share/applications/io.github.nalladev.cosmic-notes.desktop", mode = "644" },
-  { source = "resources/app.metainfo.xml", dest = "/usr/share/appdata/io.github.nalladev.cosmic-notes.metainfo.xml", mode = "644" },
-  { source = "resources/icon.svg", dest = "/usr/share/icons/hicolor/scalable/apps/io.github.nalladev.cosmic-notes.svg", mode = "644" },
+  { source = "target/release/cosmic-ext-notes", dest = "/usr/bin/cosmic-ext-notes", mode = "755" },
+  { source = "LICENSE", dest = "/usr/share/doc/cosmic-ext-notes/LICENSE", doc = true, mode = "644" },
+  { source = "resources/app.desktop", dest = "/usr/share/applications/io.github.nalladev.cosmic-ext-notes.desktop", mode = "644" },
+  { source = "resources/app.metainfo.xml", dest = "/usr/share/appdata/io.github.nalladev.cosmic-ext-notes.metainfo.xml", mode = "644" },
+  { source = "resources/icon.svg", dest = "/usr/share/icons/hicolor/scalable/apps/io.github.nalladev.cosmic-ext-notes.svg", mode = "644" },
 
 ]

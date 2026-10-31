@@ -933,6 +933,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cosmic-ext-notes"
+version = "0.1.1"
+dependencies = [
+ "dirs",
+ "i18n-embed",
+ "i18n-embed-fl",
+ "libcosmic",
+ "markion-core",
+ "open",
+ "rust-embed",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "cosmic-freedesktop-icons"
 version = "0.4.0"
 source = "git+https://github.com/pop-os/freedesktop-icons#ab4c57b8e416c6af9297cb04d101889896fd9a92"
@@ -944,21 +959,6 @@ dependencies = [
  "thiserror 2.0.19",
  "tracing",
  "xdg",
-]
-
-[[package]]
-name = "cosmic-notes"
-version = "0.1.0"
-dependencies = [
- "dirs",
- "i18n-embed",
- "i18n-embed-fl",
- "libcosmic",
- "markion-core",
- "open",
- "rust-embed",
- "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -2997,7 +2997,7 @@ dependencies = [
 
 [[package]]
 name = "markion-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pulldown-cmark",
  "ratex-parser",
