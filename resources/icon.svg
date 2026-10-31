@@ -1,2 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg"/>
+<svg viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <rect x="4" y="4" width="120" height="120" rx="16" fill="#18212D"/>
+
+  <path d="M34 23H77L96 42V101H34Q28 101 28 95V29Q28 23 34 23Z"
+        fill="#B9C1C7"/>
+
+  <path d="M36 29H75L90 44V94H36Z" fill="#E2E5E4"/>
+
+  <path d="M75 29V39Q75 44 80 44H90Z" fill="#55C6D0"/>
+
+  <g fill="#66869B">
+    <rect x="43" y="54" width="39" height="5" rx="2.5"/>
+    <rect x="43" y="67" width="32" height="5" rx="2.5"/>
+    <rect x="43" y="80" width="36" height="5" rx="2.5"/>
+  </g>
+</svg>
