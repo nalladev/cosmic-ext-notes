@@ -1,0 +1,43 @@
+
+app-id: io.github.nalladev.cosmic-ext-notes
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.llvm20
+
+command: cosmic-ext-notes
+
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --talk-name=com.system76.CosmicSettingsDaemon.*
+  - --talk-name=com.system76.CosmicSettingsDaemon
+  - --device=dri
+  - --filesystem=xdg-documents
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm20/bin
+  env:
+    CARGO_HOME: /run/build/cosmic-ext-notes/cargo
+    LIBCLANG_PATH: /usr/lib/sdk/llvm20/lib
+
+modules:
+  - name: cosmic-ext-notes
+    buildsystem: simple
+    build-commands:
+      - cargo --offline fetch --manifest-path Cargo.toml --verbose
+      - cargo --offline build --release --verbose
+      - install -Dm0755 ./target/release/cosmic-ext-notes /app/bin/cosmic-ext-notes
+      - install -Dm0644 ./resources/app.desktop /app/share/applications/io.github.nalladev.cosmic-ext-notes.desktop
+      - install -Dm0644 ./resources/app.metainfo.xml /app/share/metainfo/io.github.nalladev.cosmic-ext-notes.metainfo.xml
+      - install -Dm0644 ./resources/icon.svg /app/share/icons/hicolor/scalable/apps/io.github.nalladev.cosmic-ext-notes.svg
+    sources:
+      - type: git
+        url: https://github.com/nalladev/cosmic-ext-notes.git
+        tag: v0.1.2
+        commit: 27a89f237bdb495e05102593e49c042789218b3c
+      - type: file
+        path: flatpak/cargo-sources.json
