@@ -1,4 +1,4 @@
-app-title = Cosmic Notes
+app-title = Notes
 about = About
 repository = Repository
 file = File

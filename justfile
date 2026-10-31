@@ -1,9 +1,9 @@
 # Name of the application's binary.
-name := 'cosmic-notes'
+name := 'cosmic-ext-notes'
 # The unique ID of the application.
-appid := 'io.github.nalladev.cosmic-notes'
+appid := 'io.github.nalladev.cosmic-ext-notes'
 # The git repository this project is published from.
-repo-url := 'https://github.com/nalladev/cosmic-notes.git'
+repo-url := 'https://github.com/nalladev/cosmic-ext-notes.git'
 
 # Path to root file system, which defaults to `/`.
 rootdir := ''
@@ -132,7 +132,7 @@ vendor-flatpak:
 flatpak-install: vendor-flatpak
     #!/usr/bin/env bash
     set -euo pipefail
-    APP="io.github.nalladev.cosmic-notes"
+    APP="io.github.nalladev.cosmic-ext-notes"
     LOCAL="flatpak/local-build.json"
     python3 scripts/flatpak-manifest.py to-dir "$LOCAL"
     trap 'rm -f "$LOCAL"' EXIT
@@ -146,7 +146,7 @@ flatpak-install: vendor-flatpak
 
 # Remove the local test build.
 flatpak-uninstall:
-    flatpak uninstall --user io.github.nalladev.cosmic-notes
+    flatpak uninstall --user io.github.nalladev.cosmic-ext-notes
     echo "To get the production copy back, reinstall from the COSMIC store."
 
 # Bump the version in Cargo.toml, run cargo check, commit everything staged, and tag.
@@ -172,7 +172,7 @@ release version message='':
     norm_version=`bash -c 'v="{{version}}"; echo "${v#v}"'` && \
     python3 scripts/update-metainfo-release.py "$norm_version" "{{message}}" "{{repo-url}}" && \
     python3 scripts/flatpak-manifest.py to-git "$norm_version" "{{repo-url}}" && \
-    git add resources/app.metainfo.xml flatpak/io.github.nalladev.cosmic-notes.json && \
+    git add resources/app.metainfo.xml flatpak/io.github.nalladev.cosmic-ext-notes.json && \
     just tag "{{version}}" "{{message}}" && \
     git push origin main && \
     git push origin v"$norm_version"

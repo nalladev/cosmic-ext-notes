@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# System dependencies required to build cosmic-notes.
+# System dependencies required to build cosmic-ext-notes.
 # These are the -dev packages needed by the Rust crate's C dependencies
 # (libcosmic, smithay-client-toolkit, etc.)
 

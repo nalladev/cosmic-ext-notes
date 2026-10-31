@@ -1,9 +1,9 @@
 [Desktop Entry]
-Name=Cosmic Notes
-Comment=A notes application for the COSMIC desktop
+Name=Notes
+Comment=A notes application for the COSMIC™ desktop
 Type=Application
-Icon=io.github.nalladev.cosmic-notes
-Exec=cosmic-notes %F
+Icon=io.github.nalladev.cosmic-ext-notes
+Exec=cosmic-ext-notes %F
 Terminal=false
 StartupNotify=true
 Categories=COSMIC

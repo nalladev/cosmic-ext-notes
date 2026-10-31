@@ -51,7 +51,7 @@ jobs:
           just build-deb
           just build-rpm
 
-          NAME="cosmic-notes"
+          NAME="cosmic-ext-notes"
           ARCH=`uname -m`
 
           mkdir ./$NAME
@@ -103,18 +103,18 @@ jobs:
       - name: Build Flatpak
         run: |
           flatpak-builder --force-clean --ccache --mirror-screenshots-url=https://dl.flathub.org/media/ \
-            --install-deps-from=flathub --repo=flatpak-repo build-dir flatpak/io.github.nalladev.cosmic-notes.json
+            --install-deps-from=flathub --repo=flatpak-repo build-dir flatpak/io.github.nalladev.cosmic-ext-notes.json
 
       - name: Create Flatpak bundle
         run: |
-          flatpak build-bundle flatpak-repo cosmic-notes.flatpak \
-            io.github.nalladev.cosmic-notes
+          flatpak build-bundle flatpak-repo cosmic-ext-notes.flatpak \
+            io.github.nalladev.cosmic-ext-notes
 
       - name: Upload Flatpak artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cosmic-notes-flatpak
-          path: cosmic-notes.flatpak
+          name: cosmic-ext-notes-flatpak
+          path: cosmic-ext-notes.flatpak
           retention-days: 30
 
   release:

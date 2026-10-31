@@ -3,7 +3,7 @@
 //! Plain-markdown note storage.
 //!
 //! Notes are stored as individual `.md` files in a "vault" directory (by default
-//! `~/Documents/cosmic-notes`, like Futo Notes). The title of a note is the file
+//! `~/Documents/Notes`, like Futo Notes). The title of a note is the file
 //! name without the extension. Metadata such as the pinned state and creation
 //! time live in a small YAML-like frontmatter block at the top of the file.
 //!

@@ -267,7 +267,7 @@ impl cosmic::Application for AppModel {
     type Message = Message;
 
     /// Unique identifier in RDNN (reverse domain name notation) format.
-    const APP_ID: &'static str = "io.github.nalladev.cosmic-notes";
+    const APP_ID: &'static str = "io.github.nalladev.cosmic-ext-notes";
 
     fn core(&self) -> &cosmic::Core {
         &self.core
@@ -2196,13 +2196,13 @@ fn append_unique_tag(tags: &mut Vec<String>, draft: &str) -> bool {
     true
 }
 
-/// The default vault directory: `~/Documents/cosmic-notes`.
+/// The default vault directory: `~/Documents/Notes`.
 #[must_use]
 fn default_vault_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Documents")
-        .join("cosmic-notes")
+        .join("Notes")
 }
 
 /// A fallback vault under the system temp directory.

@@ -8,7 +8,7 @@ use cosmic::cosmic_config::{self, CosmicConfigEntry, cosmic_config_derive::Cosmi
 pub struct Config {
     /// Directory where notes are stored as markdown files.
     ///
-    /// When `None`, the default of `~/Documents/cosmic-notes` is used.
+    /// When `None`, the default of `~/Documents/Notes` is used.
     vault_path: Option<String>,
     /// The tabs that were open when the app last closed, as paths relative
     /// to the vault root, in left-to-right tab order. Blank "Home" tabs are

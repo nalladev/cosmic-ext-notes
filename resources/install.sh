@@ -9,9 +9,9 @@ mkdir -p ~/.local/bin \
     "${XDG_DATA_HOME:-~/.local/share}/appdata" \
     "${XDG_DATA_HOME:-~/.local/share}/icons/hicolor/scalable/apps"
 
-cp ./cosmic-notes ~/.local/bin/
+cp ./cosmic-ext-notes ~/.local/bin/
 cp ./*.desktop "${XDG_DATA_HOME:-~/.local/share}/applications/"
 cp ./*.metainfo.xml "${XDG_DATA_HOME:-~/.local/share}/appdata/"
-cp ./*.svg "${XDG_DATA_HOME:-~/.local/share}/icons/hicolor/scalable/apps/io.github.nalladev.cosmic-notes.svg"
+cp ./*.svg "${XDG_DATA_HOME:-~/.local/share}/icons/hicolor/scalable/apps/io.github.nalladev.cosmic-ext-notes.svg"
 
-echo "Installed. Launch cosmic-notes from the application menu."
+echo "Installed. Launch cosmic-ext-notes from the application menu."
