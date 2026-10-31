@@ -11,7 +11,7 @@
 //! can be unit-tested in isolation.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -41,8 +41,10 @@ pub struct Note {
     modified: Option<SystemTime>,
     /// The full text of the file as it was loaded from disk.
     loaded: String,
-    /// The note body: everything after the frontmatter block.
+    /// The note body. Legacy files keep the complete original content, including frontmatter.
     body: String,
+    /// Whether the file began with a legacy frontmatter block.
+    legacy_frontmatter: bool,
 }
 
 #[allow(dead_code)] // Kept for persistence and future note-list views.
@@ -63,6 +65,12 @@ impl Note {
     #[must_use]
     pub fn pinned(&self) -> bool {
         self.pinned
+    }
+
+    /// Whether this note uses legacy YAML frontmatter that must be preserved verbatim.
+    #[must_use]
+    pub fn has_legacy_frontmatter(&self) -> bool {
+        self.legacy_frontmatter
     }
 
     /// Whether the note should open in preview mode.
@@ -92,7 +100,12 @@ impl Note {
     /// A short preview of the note: the first non-empty, non-heading line.
     #[must_use]
     pub fn snippet(&self) -> String {
-        self.body
+        let preview_body = if self.legacy_frontmatter {
+            Frontmatter::parse(&self.body).1
+        } else {
+            &self.body
+        };
+        preview_body
             .lines()
             .map(str::trim)
             .find(|line| !line.is_empty() && !line.starts_with('#'))
@@ -113,15 +126,7 @@ impl Note {
     /// The full file text (frontmatter plus body).
     #[must_use]
     fn full_text(&self) -> String {
-        let mut frontmatter = Frontmatter::new();
-        frontmatter.set_pinned(self.pinned);
-        frontmatter.set_preview(self.preview);
-        if let Some(created) = &self.created {
-            frontmatter.set_created(created.clone());
-        }
-        frontmatter.set_tags(self.tags.clone());
-        frontmatter.extra = self.extra_frontmatter.clone();
-        frontmatter.render() + &self.body
+        self.body.clone()
     }
 
     /// Builds a note from the given path and full file text.
@@ -130,8 +135,13 @@ impl Note {
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let legacy_frontmatter = text.starts_with("---\n") || text.starts_with("---\r\n");
         let (frontmatter, body) = Frontmatter::parse(&text);
-        let body = body.to_owned();
+        let body = if legacy_frontmatter {
+            text.clone()
+        } else {
+            body.to_owned()
+        };
         let modified = fs::metadata(&path).and_then(|meta| meta.modified()).ok();
         Self {
             path,
@@ -139,17 +149,24 @@ impl Note {
             pinned: frontmatter.pinned(),
             created: frontmatter.created().map(str::to_owned),
             preview: frontmatter.preview(),
-            tags: frontmatter.tags().to_vec(),
+            tags: if legacy_frontmatter {
+                frontmatter.tags().to_vec()
+            } else {
+                header_tags(&text)
+            },
             extra_frontmatter: frontmatter.extra.clone(),
             modified,
             loaded: text,
             body,
+            legacy_frontmatter,
         }
     }
 
     /// Reloads the in-memory fields from fresh file text, keeping the path.
     fn reload_from(&mut self, text: &str) {
+        let legacy_frontmatter = text.starts_with("---\n") || text.starts_with("---\r\n");
         let (frontmatter, body) = Frontmatter::parse(text);
+        self.legacy_frontmatter = legacy_frontmatter;
         self.title = self
             .path
             .file_stem()
@@ -158,13 +175,21 @@ impl Note {
         self.pinned = frontmatter.pinned();
         self.created = frontmatter.created().map(str::to_owned);
         self.preview = frontmatter.preview();
-        self.tags = frontmatter.tags().to_vec();
+        self.tags = if legacy_frontmatter {
+            frontmatter.tags().to_vec()
+        } else {
+            header_tags(text)
+        };
         self.extra_frontmatter = frontmatter.extra.clone();
         self.modified = fs::metadata(&self.path)
             .and_then(|meta| meta.modified())
             .ok();
         text.clone_into(&mut self.loaded);
-        body.clone_into(&mut self.body);
+        if legacy_frontmatter {
+            text.clone_into(&mut self.body);
+        } else {
+            body.clone_into(&mut self.body);
+        }
     }
 }
 
@@ -194,6 +219,8 @@ pub struct Vault {
     notes: Vec<Note>,
     /// The directory structure of the vault, rebuilt whenever notes change.
     tree: Tree,
+    /// Portable vault-relative pins stored in `.app-pins.json`.
+    pins: HashSet<PathBuf>,
 }
 
 #[allow(dead_code)] // The simplified UI does not currently expose every vault operation.
@@ -221,12 +248,14 @@ impl Vault {
                 .then_with(|| a.title.cmp(&b.title))
         });
         let tree = build_tree(&root)?;
+        let pins = load_pins(&root)?;
 
         Ok(Self {
             root,
             trash,
             notes,
             tree,
+            pins,
         })
     }
 
@@ -240,6 +269,45 @@ impl Vault {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Notes pinned in the portable vault store, in deterministic path order.
+    pub fn pinned_notes(&self) -> Vec<&Note> {
+        let mut notes: Vec<_> = self
+            .notes
+            .iter()
+            .filter(|note| {
+                !note.in_trash()
+                    && note.path.is_file()
+                    && self
+                        .pins
+                        .contains(&relative_note_path(&self.root, &note.path))
+            })
+            .collect();
+        notes.sort_by_key(|note| note.path.clone());
+        notes
+    }
+
+    /// Toggles a note's portable pin entry.
+    pub fn toggle_pin(&mut self, path: &Path) -> io::Result<bool> {
+        let Some(note) = self
+            .notes
+            .iter()
+            .find(|note| note.path == path && !note.in_trash())
+        else {
+            return Ok(false);
+        };
+        let relative = relative_note_path(&self.root, &note.path);
+        let mut updated = self.pins.clone();
+        let pinned = if updated.remove(&relative) {
+            false
+        } else {
+            updated.insert(relative);
+            true
+        };
+        save_pins(&self.root, &updated)?;
+        self.pins = updated;
+        Ok(pinned)
     }
 
     /// Creates a new note with the given title at the vault root. The title is
@@ -270,10 +338,7 @@ impl Vault {
             return Ok(None);
         };
         let path = unique_path(parent, &stem);
-        let mut frontmatter = Frontmatter::new();
-        frontmatter.set_pinned(false);
-        frontmatter.set_created(now_rfc3339());
-        let text = frontmatter.render();
+        let text = String::new();
         write_atomic(&path, &text)?;
         let note = Note::from_text(path, text);
         self.notes.push(note.clone());
@@ -313,7 +378,11 @@ impl Vault {
         };
         let note = &mut self.notes[index];
         body.clone_into(&mut note.body);
-        note.tags = tags.to_vec();
+        note.tags = if note.legacy_frontmatter {
+            tags.to_vec()
+        } else {
+            header_tags(body)
+        };
         let new_text = note.full_text();
 
         let disk_text = fs::read_to_string(&note.path)?;
@@ -347,12 +416,14 @@ impl Vault {
         let Some(index) = self.notes.iter().position(|note| note.path == id) else {
             return Ok(None);
         };
-        let note = &mut self.notes[index];
-        let dir = note.path.parent().ok_or_else(|| {
+        let old_path = self.notes[index].path.clone();
+        let dir = old_path.parent().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "note path has no parent")
         })?;
         let new_path = unique_path(dir, &stem);
-        fs::rename(&note.path, &new_path)?;
+        fs::rename(&old_path, &new_path)?;
+        self.remap_pin(&old_path, &new_path)?;
+        let note = &mut self.notes[index];
         note.path = new_path;
         note.title = note
             .path
@@ -372,11 +443,14 @@ impl Vault {
     /// # Errors
     ///
     /// Returns an error if the note file cannot be read or written.
-    pub fn toggle_pin(&mut self, id: &Path) -> io::Result<Option<Note>> {
+    pub fn toggle_legacy_pin(&mut self, id: &Path) -> io::Result<Option<Note>> {
         let Some(index) = self.notes.iter().position(|note| note.path == id) else {
             return Ok(None);
         };
         let note = &mut self.notes[index];
+        if !note.legacy_frontmatter {
+            return Ok(Some(note.clone()));
+        }
         note.pinned = !note.pinned;
 
         let disk_text = fs::read_to_string(&note.path)?;
@@ -404,6 +478,9 @@ impl Vault {
         };
         let note = &mut self.notes[index];
         note.preview = preview;
+        if !note.legacy_frontmatter {
+            return Ok(Some(note.clone()));
+        }
 
         let disk_text = fs::read_to_string(&note.path)?;
         let (mut frontmatter, body) = Frontmatter::parse(&disk_text);
@@ -428,12 +505,16 @@ impl Vault {
         let Some(index) = self.notes.iter().position(|note| note.path == id) else {
             return Ok(None);
         };
-        let note = &mut self.notes[index];
-        if note.in_trash() {
+        if self.notes[index].in_trash() {
             return Ok(None);
         }
-        let new_path = unique_path(&self.trash, &note.title);
-        fs::rename(&note.path, &new_path)?;
+        let old_path = self.notes[index].path.clone();
+        let title = self.notes[index].title.clone();
+        let new_path = unique_path(&self.trash, &title);
+        fs::rename(&old_path, &new_path)?;
+        self.pins.remove(&relative_note_path(&self.root, &old_path));
+        self.save_pins()?;
+        let note = &mut self.notes[index];
         note.path = new_path;
         let updated = note.clone();
         self.sort_notes();
@@ -476,6 +557,8 @@ impl Vault {
         };
         let path = self.notes[index].path.clone();
         fs::remove_file(&path)?;
+        self.pins.remove(&relative_note_path(&self.root, &path));
+        self.save_pins()?;
         self.notes.remove(index);
         self.rebuild_tree();
         Ok(true)
@@ -520,6 +603,23 @@ impl Vault {
             return Ok(Some(new_path));
         }
         fs::rename(path, &new_path)?;
+        let old_rel = path.strip_prefix(&self.root).unwrap_or(path).to_path_buf();
+        let new_rel = new_path
+            .strip_prefix(&self.root)
+            .unwrap_or(&new_path)
+            .to_path_buf();
+        self.pins = self
+            .pins
+            .drain()
+            .map(|pin| {
+                if pin.starts_with(&old_rel) {
+                    new_rel.join(pin.strip_prefix(&old_rel).expect("prefix checked"))
+                } else {
+                    pin
+                }
+            })
+            .collect();
+        self.save_pins()?;
         // The notes inside the folder move with it.
         for note in &mut self.notes {
             if note.path.starts_with(path) {
@@ -543,6 +643,10 @@ impl Vault {
     /// Returns an error if the directory cannot be removed.
     pub fn delete_folder(&mut self, path: &Path) -> io::Result<usize> {
         fs::remove_dir_all(path)?;
+        if let Ok(relative) = path.strip_prefix(&self.root) {
+            self.pins.retain(|pin| !pin.starts_with(relative));
+            self.save_pins()?;
+        }
         let before = self.notes.len();
         self.notes.retain(|note| !note.path.starts_with(path));
         self.rebuild_tree();
@@ -595,6 +699,19 @@ impl Vault {
             }
         }
         Ok(())
+    }
+
+    fn remap_pin(&mut self, old: &Path, new: &Path) -> io::Result<()> {
+        let old_rel = relative_note_path(&self.root, old);
+        if self.pins.remove(&old_rel) {
+            self.pins.insert(relative_note_path(&self.root, new));
+            self.save_pins()?;
+        }
+        Ok(())
+    }
+
+    fn save_pins(&self) -> io::Result<()> {
+        save_pins(&self.root, &self.pins)
     }
 
     /// Re-sorts the notes: pinned first, then by modification time descending,
@@ -911,6 +1028,146 @@ impl Frontmatter {
     }
 }
 
+/// Finds Markdown hashtags while excluding inline and fenced code.
+#[must_use]
+pub fn discover_tags(text: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    let mut fence: Option<(u8, usize)> = None;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let bytes = trimmed.as_bytes();
+        let marker = bytes.first().copied();
+        if matches!(marker, Some(b'`' | b'~')) {
+            let count = bytes.iter().take_while(|b| Some(**b) == marker).count();
+            if count >= 3 {
+                if let Some((kind, min)) = fence {
+                    if marker == Some(kind) && count >= min {
+                        fence = None;
+                    }
+                } else {
+                    fence = Some((marker.unwrap(), count));
+                }
+                continue;
+            }
+        }
+        if fence.is_some() {
+            continue;
+        }
+        let mut inline_ticks = 0usize;
+        let mut chars = line.char_indices().peekable();
+        while let Some((index, ch)) = chars.next() {
+            if ch == '`' {
+                inline_ticks = if inline_ticks == 0 {
+                    line[index..].chars().take_while(|c| *c == '`').count()
+                } else {
+                    0
+                };
+                continue;
+            }
+            if inline_ticks > 0 || ch != '#' {
+                continue;
+            }
+            let prev = line[..index].chars().next_back();
+            if prev.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '\\') {
+                continue;
+            }
+            let tail = &line[index + 1..];
+            let tag: String = tail
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                .collect();
+            if !tag.is_empty() && !tags.iter().any(|t: &String| t.eq_ignore_ascii_case(&tag)) {
+                tags.push(tag);
+            }
+        }
+    }
+    tags
+}
+
+/// Parses tags only from a tag-only first line; Markdown code regions are irrelevant here.
+pub fn header_tags(text: &str) -> Vec<String> {
+    let Some(line) = text.lines().next() else {
+        return Vec::new();
+    };
+    let tokens: Vec<_> = line.split_whitespace().collect();
+    if tokens.is_empty()
+        || !tokens
+            .iter()
+            .all(|token| token.starts_with('#') && token.len() > 1)
+    {
+        return Vec::new();
+    }
+    let mut tags = Vec::new();
+    for token in tokens {
+        let tag = token
+            .trim_start_matches('#')
+            .trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
+        if !tag.is_empty() && !tags.iter().any(|t: &String| t.eq_ignore_ascii_case(tag)) {
+            tags.push(tag.to_owned());
+        }
+    }
+    tags
+}
+
+fn relative_note_path(root: &Path, path: &Path) -> PathBuf {
+    path.strip_prefix(root).unwrap_or(path).to_path_buf()
+}
+
+fn valid_pin_path(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && path.extension().is_some_and(|ext| ext == "md")
+        && path
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+        && !path.components().any(|part| {
+            part.as_os_str().to_string_lossy().starts_with('.') || part.as_os_str() == TRASH_DIR
+        })
+}
+
+fn load_pins(root: &Path) -> io::Result<HashSet<PathBuf>> {
+    let path = root.join(".app-pins.json");
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return Ok(HashSet::new());
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+    if parsed.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+        return Ok(HashSet::new());
+    }
+    let pins: HashSet<_> = parsed
+        .get("paths")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(PathBuf::from)
+        .filter(|p| valid_pin_path(p) && root.join(p).is_file())
+        .collect();
+    if parsed
+        .get("paths")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| items.len() != pins.len())
+    {
+        save_pins(root, &pins)?;
+    }
+    Ok(pins)
+}
+
+fn save_pins(root: &Path, pins: &HashSet<PathBuf>) -> io::Result<()> {
+    let mut paths: Vec<_> = pins
+        .iter()
+        .filter(|p| valid_pin_path(p))
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect();
+    paths.sort();
+    paths.dedup();
+    let value = serde_json::json!({"version": 1, "paths": paths});
+    let data = serde_json::to_vec_pretty(&value).map_err(io::Error::other)?;
+    write_atomic(
+        &root.join(".app-pins.json"),
+        &String::from_utf8_lossy(&data),
+    )
+}
+
 /// Strips surrounding quotes from a YAML scalar.
 fn unquote(value: &str) -> String {
     let trimmed = value.trim();
@@ -1096,6 +1353,83 @@ mod tests {
     }
 
     #[test]
+    fn new_notes_are_plain_markdown_and_header_tags_are_content() {
+        let dir = temp_dir();
+        let mut vault = Vault::open(&dir).expect("open");
+        let note = vault.create("Fresh").expect("create").expect("note");
+        assert_eq!(fs::read_to_string(note.path()).expect("read"), "");
+        let content = "#work #Ideas\n\nBody #ordinary";
+        vault.save(note.path(), content).expect("save");
+        assert_eq!(fs::read_to_string(note.path()).expect("read"), content);
+        let loaded = Vault::open(&dir).expect("reopen");
+        assert_eq!(loaded.notes()[0].tags(), &["work", "Ideas"]);
+    }
+
+    #[test]
+    fn body_tag_discovery_ignores_inline_and_fenced_code() {
+        assert_eq!(
+            discover_tags("#real `#inline`\n\n```md\n#fenced\n```\n#also-real"),
+            vec!["real", "also-real"]
+        );
+    }
+
+    #[test]
+    fn legacy_frontmatter_is_preserved_on_edit() {
+        let dir = temp_dir();
+        let path = dir.join("old.md");
+        let original = "---\npinned: false\ncreated: 2026-08-11T10:52:39Z\npreview: false\ntags: Example, hello\nunknown: keep\n---\n\n# Old\n";
+        fs::write(&path, original).expect("write");
+        let mut vault = Vault::open(&dir).expect("open");
+        assert_eq!(vault.notes()[0].body(), original);
+        let edited = format!("{original}Added text\n");
+        vault.save(&path, &edited).expect("save");
+        assert_eq!(fs::read_to_string(path).expect("read"), edited);
+    }
+
+    #[test]
+    fn pin_store_validates_deduplicates_and_tracks_renames() {
+        let dir = temp_dir();
+        let mut vault = Vault::open(&dir).expect("open");
+        let note = vault.create("Pinned").expect("create").expect("note");
+        let path = note.path().to_path_buf();
+        assert!(vault.toggle_pin(&path).expect("pin"));
+        let raw = fs::read_to_string(dir.join(".app-pins.json")).expect("pin file");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(value["version"], 1);
+        assert_eq!(value["paths"].as_array().expect("paths").len(), 1);
+        let duplicate =
+            serde_json::json!({"version": 1, "paths": ["Pinned.md", "Pinned.md", "../escape.md"]});
+        fs::write(dir.join(".app-pins.json"), duplicate.to_string())
+            .expect("write duplicate pin data");
+        vault = Vault::open(&dir).expect("reload pins");
+        assert_eq!(vault.pinned_notes().len(), 1);
+        let normalized: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".app-pins.json")).expect("pins"))
+                .expect("json");
+        assert_eq!(normalized["paths"].as_array().expect("paths").len(), 1);
+        assert!(!valid_pin_path(Path::new("../outside.md")));
+        assert!(!valid_pin_path(Path::new(".trash/hidden.md")));
+        let renamed = vault
+            .rename(&path, "Renamed")
+            .expect("rename")
+            .expect("note");
+        assert_eq!(vault.pinned_notes()[0].path(), renamed.path());
+        let trash_path = vault
+            .trash(renamed.path())
+            .expect("trash")
+            .expect("note")
+            .path()
+            .to_path_buf();
+        assert!(vault.pinned_notes().is_empty());
+        let restored = vault.restore(&trash_path).expect("restore").expect("note");
+        assert!(
+            vault.pinned_notes().is_empty(),
+            "restore does not revive removed pins"
+        );
+        assert!(vault.delete(restored.path()).expect("delete"));
+    }
+
+    #[test]
     fn frontmatter_round_trips() {
         let text =
             "---\npinned: true\ncreated: 2026-08-09T12:00:00Z\nfoo: bar\n---\n\n# Hi\n\nBody";
@@ -1251,7 +1585,7 @@ mod tests {
 
         let on_disk = fs::read_to_string(&path).expect("read");
         assert!(on_disk.contains("First real line"));
-        assert!(on_disk.starts_with("---\npinned: false\n"));
+        assert!(!on_disk.starts_with("---"));
 
         let updated = vault
             .notes()
@@ -1318,61 +1652,35 @@ mod tests {
     }
 
     #[test]
-    fn toggle_pin_preserves_body_and_extras() {
+    fn toggle_pin_uses_portable_store_without_changing_note() {
         let dir = temp_dir();
         let mut vault = Vault::open(&dir).expect("open");
         let note = vault.create("Ideas").expect("create").expect("title");
         let path = note.path().to_path_buf();
         vault.save(&path, "# Ideas\n\nSome body").expect("save");
 
-        let pinned = vault.toggle_pin(&path).expect("toggle").expect("note");
-        assert!(pinned.pinned());
-
-        let unpinned = vault.toggle_pin(&path).expect("toggle").expect("note");
-        assert!(!unpinned.pinned());
+        assert!(vault.toggle_pin(&path).expect("toggle"));
+        assert!(dir.join(".app-pins.json").exists());
+        assert!(!vault.toggle_pin(&path).expect("toggle"));
 
         let on_disk = fs::read_to_string(&path).expect("read");
         assert!(on_disk.contains("Some body"));
+        assert!(!on_disk.starts_with("---"));
     }
 
     #[test]
-    fn set_preview_persists_and_preserves_mtime() {
+    fn set_preview_does_not_add_metadata_to_new_format() {
         let dir = temp_dir();
         let mut vault = Vault::open(&dir).expect("open");
         let note = vault.create("Preview me").expect("create").expect("title");
         let path = note.path().to_path_buf();
-        let mtime = note.modified().expect("mtime");
-
-        // Toggling preview must not reorder the list, so the mtime is preserved.
+        vault.save(&path, "Body").expect("save");
         let updated = vault
             .set_preview(&path, true)
             .expect("set preview")
             .expect("note");
         assert!(updated.preview());
-        assert_eq!(updated.modified(), Some(mtime));
-
-        // The preference is stored in the frontmatter and survives a reopen.
-        let on_disk = fs::read_to_string(&path).expect("read");
-        assert!(on_disk.contains("preview: true"));
-        let reopened = Vault::open(&dir).expect("reopen");
-        let reloaded = reopened
-            .notes()
-            .iter()
-            .find(|note| note.path() == path)
-            .expect("note present");
-        assert!(reloaded.preview());
-
-        // Turning it off writes `preview: false`.
-        let off = vault
-            .set_preview(&path, false)
-            .expect("set preview")
-            .expect("note");
-        assert!(!off.preview());
-        assert!(
-            fs::read_to_string(&path)
-                .expect("read")
-                .contains("preview: false")
-        );
+        assert_eq!(fs::read_to_string(&path).expect("read"), "Body");
     }
 
     #[test]
@@ -1453,7 +1761,7 @@ mod tests {
     }
 
     #[test]
-    fn pinned_notes_sort_first() {
+    fn portable_pins_load_and_sort_deterministically() {
         let dir = temp_dir();
         let mut vault = Vault::open(&dir).expect("open");
         let a = vault.create("A").expect("create").expect("title");
@@ -1472,9 +1780,12 @@ mod tests {
         set_mtime(c.path(), 300);
         let mut vault = Vault::open(&dir).expect("reopen");
         vault.toggle_pin(b.path()).expect("pin");
-
-        let titles: Vec<&str> = vault.notes().iter().map(Note::title).collect();
-        assert_eq!(titles, vec!["B", "C", "A"]);
+        let pinned: Vec<&str> = vault
+            .pinned_notes()
+            .iter()
+            .map(|note| note.title())
+            .collect();
+        assert_eq!(pinned, vec!["B"]);
     }
 
     #[test]

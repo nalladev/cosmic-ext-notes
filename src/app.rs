@@ -32,6 +32,8 @@ static MENU_ID: std::sync::LazyLock<cosmic::widget::Id> =
 const AUTOSAVE_INTERVAL: Duration = Duration::from_millis(500);
 /// Widget id of the note title input.
 const TITLE_ID: &str = "note-title";
+/// Widget id of the header tag input.
+const TAG_ID: &str = "note-tag";
 /// Widget id of the folder name input in the sidebar dialog.
 const DIALOG_NAME_ID: &str = "sidebar-folder-name";
 
@@ -102,6 +104,11 @@ pub enum Message {
     /// Commit the pending tag.
     CommitTag,
 
+    /// Escape was pressed outside a widget that consumed the event.
+    EscapePressed,
+    /// Commit title edits after the title field loses focus.
+    RenameFocusLost,
+
     /// Remove a tag from the active note.
     RemoveTag(String),
     /// Commit the current title as a rename.
@@ -162,6 +169,7 @@ impl Shortcut {
 enum NavEntry {
     Folder(PathBuf),
     Note(PathBuf),
+    PinnedHeader,
 }
 
 /// The open sidebar dialog: creates or renames a folder.
@@ -189,11 +197,18 @@ struct Tab {
     tags: Vec<String>,
     tag_draft: String,
     tag_editing: bool,
+    legacy_frontmatter: bool,
     dirty: bool,
 }
 
 impl Tab {
-    fn new(path: PathBuf, body: &str, title: &str, tags: &[String]) -> Self {
+    fn new(
+        path: PathBuf,
+        body: &str,
+        title: &str,
+        tags: &[String],
+        legacy_frontmatter: bool,
+    ) -> Self {
         let mut editor = editor::Editor::new(body);
         if let Some(parent) = path.parent() {
             editor.set_image_directory(parent);
@@ -206,11 +221,12 @@ impl Tab {
             tags: tags.to_vec(),
             tag_draft: String::new(),
             tag_editing: false,
+            legacy_frontmatter,
             dirty: false,
         }
     }
 
-    fn load_body(&mut self, body: &str, title: &str, tags: &[String]) {
+    fn load_body(&mut self, body: &str, title: &str, tags: &[String], legacy_frontmatter: bool) {
         self.editor = editor::Editor::new(body);
         if let Some(parent) = self.path.as_ref().and_then(|path| path.parent()) {
             self.editor.set_image_directory(parent);
@@ -220,6 +236,7 @@ impl Tab {
         self.tags = tags.to_vec();
         self.tag_draft.clear();
         self.tag_editing = false;
+        self.legacy_frontmatter = legacy_frontmatter;
         self.dirty = false;
     }
 
@@ -232,6 +249,7 @@ impl Tab {
             tags: Vec::new(),
             tag_draft: String::new(),
             tag_editing: false,
+            legacy_frontmatter: false,
             dirty: false,
         }
     }
@@ -288,7 +306,7 @@ impl cosmic::Application for AppModel {
                 Task::none()
             }
             Some(NavEntry::Note(path)) => self.open_tab(&path, false),
-            None => Task::none(),
+            Some(NavEntry::PinnedHeader) | None => Task::none(),
         }
     }
 
@@ -392,7 +410,21 @@ impl cosmic::Application for AppModel {
                             NavMenuAction::DeleteItem(entity),
                         ));
                     }
-                    Some(NavEntry::Note(_)) => {
+                    Some(NavEntry::Note(path)) => {
+                        let pinned = self
+                            .vault
+                            .pinned_notes()
+                            .iter()
+                            .any(|note| note.path() == path);
+                        items.push(menu::Item::Button(
+                            if pinned {
+                                "Unpin".to_owned()
+                            } else {
+                                "Pin".to_owned()
+                            },
+                            None,
+                            NavMenuAction::TogglePin(entity),
+                        ));
                         items.push(menu::Item::Button(
                             fl!("open-in-new-tab"),
                             None,
@@ -405,7 +437,7 @@ impl cosmic::Application for AppModel {
                             NavMenuAction::DeleteItem(entity),
                         ));
                     }
-                    None => {}
+                    Some(NavEntry::PinnedHeader) | None => {}
                 }
                 items
             })
@@ -537,7 +569,13 @@ impl cosmic::Application for AppModel {
             app.tab_model
                 .insert()
                 .text(title.clone())
-                .data::<Tab>(Tab::new(path, &body, &title, note.tags()))
+                .data::<Tab>(Tab::new(
+                    path,
+                    &body,
+                    &title,
+                    note.tags(),
+                    note.has_legacy_frontmatter(),
+                ))
                 .closable()
                 .activate();
         }
@@ -647,6 +685,9 @@ impl cosmic::Application for AppModel {
             // same filter `event::listen()` applied.
             event::listen_with(|event, status, _window| match event {
                 event::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                    if key == keyboard::Key::Named(keyboard::key::Named::Escape) {
+                        return Some(Message::EscapePressed);
+                    }
                     if status != event::Status::Ignored {
                         return None;
                     }
@@ -772,7 +813,7 @@ impl cosmic::Application for AppModel {
                 Task::none()
             }
 
-            Message::RenameSubmit => {
+            Message::RenameFocusLost | Message::RenameSubmit => {
                 self.commit_title_rename();
                 self.update_title()
             }
@@ -782,7 +823,7 @@ impl cosmic::Application for AppModel {
                     tab.tag_editing = true;
                     tab.tag_draft.clear();
                 }
-                Task::none()
+                text_input::focus(cosmic::widget::Id::new(TAG_ID)).map(cosmic::action::app)
             }
 
             Message::EditTag(value) => {
@@ -794,15 +835,26 @@ impl cosmic::Application for AppModel {
 
             Message::CommitTag => {
                 self.commit_tag();
+                self.save_active(false)
+            }
+
+            Message::EscapePressed => {
+                if let Some(tab) = self.active_tab_mut()
+                    && tab.tag_editing
+                {
+                    tab.tag_draft.clear();
+                    tab.tag_editing = false;
+                }
                 Task::none()
             }
 
             Message::RemoveTag(tag) => {
                 if let Some(tab) = self.active_tab_mut() {
                     tab.tags.retain(|existing| existing != &tag);
+                    Self::sync_header_tags(tab);
                     tab.dirty = true;
                 }
-                Task::none()
+                self.save_active(false)
             }
 
             Message::NavMenuAction(action) => {
@@ -815,6 +867,10 @@ impl cosmic::Application for AppModel {
                     NavMenuAction::RenameFolder(entity) => self.open_rename_dialog(entity),
                     NavMenuAction::DeleteItem(entity) => self.delete_sidebar_item(entity),
                     NavMenuAction::OpenInNewTab(entity) => self.open_sidebar_item_new_tab(entity),
+                    NavMenuAction::TogglePin(entity) => {
+                        self.toggle_sidebar_pin(entity);
+                        Task::none()
+                    }
                 }
             }
 
@@ -906,6 +962,9 @@ impl cosmic::Application for AppModel {
             Message::Editor(message) => {
                 if let Some(tab) = self.active_tab_mut() {
                     tab.editor.update(message);
+                    if !tab.legacy_frontmatter {
+                        tab.tags = crate::notes::header_tags(tab.editor.text());
+                    }
                     tab.dirty = tab.editor.text() != tab.saved_body;
                 }
                 self.update_title()
@@ -955,11 +1014,24 @@ impl AppModel {
     }
 
     /// Inserts a new tab for the note at `path` and makes it active.
-    fn new_tab(&mut self, path: &Path, body: &str, title: &str, tags: &[String]) {
+    fn new_tab(
+        &mut self,
+        path: &Path,
+        body: &str,
+        title: &str,
+        tags: &[String],
+        legacy_frontmatter: bool,
+    ) {
         self.tab_model
             .insert()
             .text(title.to_owned())
-            .data::<Tab>(Tab::new(path.to_path_buf(), body, title, tags))
+            .data::<Tab>(Tab::new(
+                path.to_path_buf(),
+                body,
+                title,
+                tags,
+                legacy_frontmatter,
+            ))
             .closable()
             .activate();
         self.persist_tabs();
@@ -1001,9 +1073,10 @@ impl AppModel {
             let body = note.body().to_owned();
             let title = note.title().to_owned();
             let tags = note.tags().to_vec();
+            let legacy_frontmatter = note.has_legacy_frontmatter();
             if let Some(tab) = self.active_tab_mut() {
                 tab.path = Some(path.to_path_buf());
-                tab.load_body(&body, &title, &tags);
+                tab.load_body(&body, &title, &tags, legacy_frontmatter);
             }
             let entity = self.tab_model.active();
             self.tab_model.text_set(entity, title);
@@ -1018,7 +1091,8 @@ impl AppModel {
         let body = note.body().to_owned();
         let title = note.title().to_owned();
         let tags = note.tags().to_vec();
-        self.new_tab(path, &body, &title, &tags);
+        let legacy_frontmatter = note.has_legacy_frontmatter();
+        self.new_tab(path, &body, &title, &tags, legacy_frontmatter);
         self.rebuild_nav_model();
         Task::batch([save, self.update_title()])
     }
@@ -1121,7 +1195,13 @@ impl AppModel {
                 let path = note.path().to_path_buf();
                 let body = note.body().to_owned();
                 let title = note.title().to_owned();
-                self.new_tab(&path, &body, &title, note.tags());
+                self.new_tab(
+                    &path,
+                    &body,
+                    &title,
+                    note.tags(),
+                    note.has_legacy_frontmatter(),
+                );
                 self.rebuild_nav_model();
                 let focus =
                     text_input::focus(cosmic::widget::Id::new(TITLE_ID)).map(cosmic::action::app);
@@ -1155,7 +1235,7 @@ impl AppModel {
                 let title = note.title().to_owned();
                 let tags = note.tags().to_vec();
                 self.expanded.insert(parent);
-                self.new_tab(&path, &body, &title, &tags);
+                self.new_tab(&path, &body, &title, &tags, note.has_legacy_frontmatter());
                 self.rebuild_nav_model();
                 let focus =
                     text_input::focus(cosmic::widget::Id::new(TITLE_ID)).map(cosmic::action::app);
@@ -1217,6 +1297,7 @@ impl AppModel {
                                     note.body().to_owned(),
                                     note.title().to_owned(),
                                     note.tags().to_vec(),
+                                    note.has_legacy_frontmatter(),
                                 )
                             }),
                         None => None,
@@ -1224,8 +1305,8 @@ impl AppModel {
                 };
                 if let Some(tab) = self.active_tab_mut() {
                     tab.dirty = false;
-                    if let Some((body, title, tags)) = reload {
-                        tab.load_body(&body, &title, &tags);
+                    if let Some((body, title, tags, legacy_frontmatter)) = reload {
+                        tab.load_body(&body, &title, &tags, legacy_frontmatter);
                     }
                 }
                 let name = conflict
@@ -1254,19 +1335,59 @@ impl AppModel {
         let Some(tab) = self.active_tab_mut() else {
             return;
         };
-        let tag = tab.tag_draft.trim().trim_start_matches('#').trim();
-        if !tag.is_empty()
-            && !tab
-                .tags
-                .iter()
-                .any(|existing| existing.eq_ignore_ascii_case(tag))
-        {
-            tab.tags.push(tag.to_owned());
-            tab.tags.sort_unstable_by_key(|value| value.to_lowercase());
+        if !tab.tag_editing {
+            return;
+        }
+        if append_unique_tag(&mut tab.tags, &tab.tag_draft) {
+            Self::sync_header_tags(tab);
             tab.dirty = true;
         }
         tab.tag_draft.clear();
         tab.tag_editing = false;
+    }
+
+    /// Replaces only the first-line tag region, preserving the editor and its undo history.
+    fn sync_header_tags(tab: &mut Tab) {
+        let source = tab.editor.text();
+        if tab.legacy_frontmatter {
+            return;
+        }
+        let first_line = source.lines().next().unwrap_or_default();
+        let has_header = crate::notes::header_tags(first_line).len() > 0;
+        let old_end = if has_header {
+            source.find('\n').map_or(source.len(), |index| index + 1)
+        } else {
+            0
+        };
+        let header = tab
+            .tags
+            .iter()
+            .map(|tag| format!("#{tag}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let replacement = if header.is_empty() {
+            String::new()
+        } else {
+            format!("{header}\n")
+        };
+        let selection = tab.editor.selection();
+        let replacement_len = replacement.len();
+        let map_position = |position: usize| {
+            if position <= old_end {
+                replacement_len
+            } else {
+                replacement_len + position - old_end
+            }
+        };
+        tab.editor.update(editor::Message::Select {
+            anchor: 0,
+            cursor: old_end,
+        });
+        tab.editor.update(editor::Message::Insert(replacement));
+        tab.editor.update(editor::Message::Select {
+            anchor: map_position(selection.start),
+            cursor: map_position(selection.end),
+        });
     }
 
     /// Commits the title draft as a rename, if it changed.
@@ -1277,28 +1398,56 @@ impl AppModel {
         else {
             return;
         };
-        let Some(note) = self.vault.notes().iter().find(|note| note.path() == path) else {
+        let Some(current_title) = self
+            .vault
+            .notes()
+            .iter()
+            .find(|note| note.path() == path)
+            .map(|note| note.title().to_owned())
+        else {
             return;
         };
-        if note.title() == title_draft {
+        if current_title == title_draft {
             return;
         }
         match self.vault.rename(&path, &title_draft) {
             Ok(Some(updated)) => {
-                let entity = self.tab_model.active();
                 let new_path = updated.path().to_path_buf();
                 let new_title = updated.title().to_owned();
-                if let Some(tab) = self.tab_model.active_data_mut::<Tab>() {
-                    tab.path = Some(new_path);
-                    new_title.clone_into(&mut tab.title_draft);
+                let entities: Vec<_> = self.tab_model.iter().collect();
+                for entity in entities {
+                    let updated_tab = if let Some(tab) = self.tab_model.data_mut::<Tab>(entity)
+                        && tab.path.as_deref() == Some(path.as_path())
+                    {
+                        tab.path = Some(new_path.clone());
+                        new_title.clone_into(&mut tab.title_draft);
+                        true
+                    } else {
+                        false
+                    };
+                    if updated_tab {
+                        self.tab_model.text_set(entity, new_title.clone());
+                    }
                 }
-                // Keep the tab button label in sync with the new title.
-                self.tab_model.text_set(entity, new_title);
+                self.persist_tabs();
                 self.rebuild_nav_model();
             }
-            Ok(None) => {}
+            Ok(None) => {
+                // Invalid/empty names leave the note where it is and restore
+                // the filename-derived title instead of retaining a draft.
+                if let Some(tab) = self.active_tab_mut()
+                    && tab.path.as_deref() == Some(path.as_path())
+                {
+                    current_title.clone_into(&mut tab.title_draft);
+                }
+            }
             Err(err) => {
                 eprintln!("failed to rename note: {err}");
+                if let Some(tab) = self.active_tab_mut()
+                    && tab.path.as_deref() == Some(path.as_path())
+                {
+                    current_title.clone_into(&mut tab.title_draft);
+                }
             }
         }
     }
@@ -1308,6 +1457,17 @@ impl AppModel {
     fn rebuild_nav_model(&mut self) {
         let selected = self.active_tab().and_then(|tab| tab.path.clone());
         let mut model = nav_bar::Model::default();
+        let pinned = self.vault.pinned_notes();
+        if !pinned.is_empty() {
+            model.insert().text("Pinned").data(NavEntry::PinnedHeader);
+            for note in pinned {
+                model
+                    .insert()
+                    .indent(1)
+                    .text(note.title().to_owned())
+                    .data(NavEntry::Note(note.path().to_path_buf()));
+            }
+        }
         Self::append_nav_nodes(
             &mut model,
             self.vault.tree(),
@@ -1368,6 +1528,16 @@ impl AppModel {
                 }
             }
         }
+    }
+
+    fn toggle_sidebar_pin(&mut self, entity: nav_bar::Id) {
+        let Some(NavEntry::Note(path)) = self.nav_model.data::<NavEntry>(entity).cloned() else {
+            return;
+        };
+        if let Err(err) = self.vault.toggle_pin(&path) {
+            eprintln!("failed to update pins: {err}");
+        }
+        self.rebuild_nav_model();
     }
 
     /// Pushes a toast notification.
@@ -1486,6 +1656,7 @@ impl AppModel {
                     Task::none()
                 }
             },
+            NavEntry::PinnedHeader => Task::none(),
             NavEntry::Folder(path) => match self.vault.delete_folder(&path) {
                 Ok(_) => {
                     self.expanded
@@ -1602,6 +1773,7 @@ impl AppModel {
             .id(cosmic::widget::Id::new(TITLE_ID))
             .on_input(Message::EditTitle)
             .on_submit(|_| Message::RenameSubmit)
+            .on_unfocus(Message::RenameFocusLost)
             .style(cosmic::theme::TextInput::EditableText)
             .size(27)
             .font(cosmic::iced::Font {
@@ -1716,8 +1888,10 @@ impl AppModel {
         if tab.tag_editing {
             row = row.push(
                 text_input::inline_input("Tag", &tab.tag_draft)
+                    .id(cosmic::widget::Id::new(TAG_ID))
                     .on_input(Message::EditTag)
                     .on_submit(|_| Message::CommitTag)
+                    .on_unfocus(Message::CommitTag)
                     .size(13)
                     .width(Length::Fixed(120.0)),
             );
@@ -2019,6 +2193,20 @@ impl AppModel {
     }
 }
 
+fn append_unique_tag(tags: &mut Vec<String>, draft: &str) -> bool {
+    let tag = draft.trim().trim_start_matches('#').trim();
+    if tag.is_empty()
+        || tags
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(tag))
+    {
+        return false;
+    }
+    tags.push(tag.to_owned());
+    tags.sort_unstable_by_key(|value| value.to_lowercase());
+    true
+}
+
 /// The default vault directory: `~/Documents/cosmic-notes`.
 #[must_use]
 fn default_vault_path() -> PathBuf {
@@ -2077,6 +2265,8 @@ pub enum NavMenuAction {
     DeleteItem(nav_bar::Id),
     /// Open the note with the given sidebar id in a new tab.
     OpenInNewTab(nav_bar::Id),
+    /// Toggle the portable pin state of a note.
+    TogglePin(nav_bar::Id),
 }
 
 impl menu::action::MenuAction for NavMenuAction {
@@ -2084,5 +2274,46 @@ impl menu::action::MenuAction for NavMenuAction {
 
     fn message(&self) -> Self::Message {
         cosmic::Action::App(Message::NavMenuAction(*self))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tag_sync_edits_only_header_and_preserves_document_content() {
+        let newline = char::from(10).to_string();
+        let body = ["Original content", "second line"].join(&newline);
+        let mut tab = Tab::new(PathBuf::from("note.md"), &body, "note", &[], false);
+        tab.tags.push("topic".to_owned());
+        AppModel::sync_header_tags(&mut tab);
+        assert_eq!(tab.editor.text(), format!("#topic{newline}{body}"));
+        tab.tags.clear();
+        AppModel::sync_header_tags(&mut tab);
+        assert_eq!(tab.editor.text(), body);
+    }
+
+    #[test]
+    fn tag_entry_deduplicates_case_insensitively() {
+        let mut tags = vec!["Work".to_owned()];
+        assert!(!append_unique_tag(&mut tags, "#work"));
+        assert!(append_unique_tag(&mut tags, "idea"));
+        assert_eq!(tags, vec!["idea", "Work"]);
+    }
+
+    #[test]
+    fn tag_sync_never_rewrites_legacy_frontmatter() {
+        let source = "---\\ntags: Old\\nunknown: preserved\\n---\\n\\nBody";
+        let mut tab = Tab::new(
+            PathBuf::from("old.md"),
+            source,
+            "old",
+            &["Old".into()],
+            true,
+        );
+        tab.tags.push("New".to_owned());
+        AppModel::sync_header_tags(&mut tab);
+        assert_eq!(tab.editor.text(), source);
     }
 }

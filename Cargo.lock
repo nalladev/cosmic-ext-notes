@@ -957,6 +957,7 @@ dependencies = [
  "markion-core",
  "open",
  "rust-embed",
+ "serde_json",
  "tokio",
 ]
 
