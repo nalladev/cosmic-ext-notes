@@ -934,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "cosmic-ext-notes"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "dirs",
  "i18n-embed",
@@ -2997,7 +2997,7 @@ dependencies = [
 
 [[package]]
 name = "markion-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "pulldown-cmark",
  "ratex-parser",
