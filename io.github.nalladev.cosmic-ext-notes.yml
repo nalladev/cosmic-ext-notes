@@ -39,5 +39,4 @@ modules:
         url: https://github.com/nalladev/cosmic-ext-notes.git
         tag: v0.1.2
         commit: 27a89f237bdb495e05102593e49c042789218b3c
-      - type: file
-        path: flatpak/cargo-sources.json
+      - flatpak/cargo-sources.json
