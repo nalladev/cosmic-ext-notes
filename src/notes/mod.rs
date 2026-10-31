@@ -1831,7 +1831,7 @@ mod tests {
         fs::write(dir.join("readme.txt"), "ignored").expect("write");
 
         let vault = Vault::open(&dir).expect("open");
-        assert!(vault.tree().root().is_empty());
+        assert_eq!(vault.tree().root(), []);
     }
 
     #[test]
@@ -1845,7 +1845,7 @@ mod tests {
 
         // Trashing removes the note from the tree (the trash dir is hidden).
         let trashed = vault.trash(note.path()).expect("trash").expect("note");
-        assert!(vault.tree().root().is_empty());
+        assert_eq!(vault.tree().root(), []);
 
         // Restoring puts it back.
         vault

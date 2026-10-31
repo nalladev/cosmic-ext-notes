@@ -254,14 +254,14 @@ mod tests {
         let note = save(&mut vault, "Solo", "I link to [[Solo]].");
 
         // A self-link is not a backlink.
-        assert!(backlinks(&vault, &note).is_empty());
+        assert_eq!(backlinks(&vault, &note), []);
 
         // A trashed note's links do not count.
         let target = save(&mut vault, "Target", "# Target");
         let source = save(&mut vault, "Source", "Links [[Target]]");
         assert_eq!(backlinks(&vault, &target).len(), 1);
         vault.trash(&source).expect("trash");
-        assert!(backlinks(&vault, &target).is_empty());
+        assert_eq!(backlinks(&vault, &target), []);
     }
 
     #[test]
