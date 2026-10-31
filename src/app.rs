@@ -169,7 +169,6 @@ impl Shortcut {
 enum NavEntry {
     Folder(PathBuf),
     Note(PathBuf),
-    PinnedHeader,
 }
 
 /// The open sidebar dialog: creates or renames a folder.
@@ -306,7 +305,7 @@ impl cosmic::Application for AppModel {
                 Task::none()
             }
             Some(NavEntry::Note(path)) => self.open_tab(&path, false),
-            Some(NavEntry::PinnedHeader) | None => Task::none(),
+            None => Task::none(),
         }
     }
 
@@ -437,7 +436,7 @@ impl cosmic::Application for AppModel {
                             NavMenuAction::DeleteItem(entity),
                         ));
                     }
-                    Some(NavEntry::PinnedHeader) | None => {}
+                    None => {}
                 }
                 items
             })
@@ -1463,15 +1462,10 @@ impl AppModel {
         let pinned = self.vault.pinned_notes();
         let has_pinned = !pinned.is_empty();
         if has_pinned {
-            model
-                .insert()
-                .icon(icon::from_name("pin-symbolic"))
-                .text("Pinned")
-                .data(NavEntry::PinnedHeader);
             for note in pinned {
                 model
                     .insert()
-                    .indent(2)
+                    .icon(icon::from_name("pin-symbolic"))
                     .text(note.title().to_owned())
                     .data(NavEntry::Note(note.path().to_path_buf()));
             }
@@ -1676,7 +1670,6 @@ impl AppModel {
                     Task::none()
                 }
             },
-            NavEntry::PinnedHeader => Task::none(),
             NavEntry::Folder(path) => match self.vault.delete_folder(&path) {
                 Ok(_) => {
                     self.expanded
