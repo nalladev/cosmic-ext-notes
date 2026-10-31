@@ -1,6 +1,8 @@
-use super::*;
+#![allow(clippy::too_many_lines, clippy::needless_pass_by_value, clippy::struct_excessive_bools)]
+
+use super::{Range, EditorState, MarkdownDocument};
 use markion_core::{
-    model::*,
+    model::{VisualProjection, VisualBlockKind, VisualBlockEditor, VisualEditorFieldKind, VisualProjectionSegment, VisualProjectionSpan, VisualCaretAffinity, VisualBlock, InlineStyle},
     visual::{build_visual_projection_with_marked_range, indented_code_display},
 };
 

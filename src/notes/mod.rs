@@ -180,7 +180,7 @@ impl Note {
         } else {
             header_tags(text)
         };
-        self.extra_frontmatter = frontmatter.extra.clone();
+        self.extra_frontmatter.clone_from(&frontmatter.extra);
         self.modified = fs::metadata(&self.path)
             .and_then(|meta| meta.modified())
             .ok();
@@ -926,10 +926,6 @@ struct Frontmatter {
 }
 
 impl Frontmatter {
-    /// Creates an empty frontmatter block.
-    fn new() -> Self {
-        Self::default()
-    }
 
     /// The pinned state, defaulting to `false`.
     fn pinned(&self) -> bool {
@@ -951,10 +947,6 @@ impl Frontmatter {
         self.pinned = Some(pinned);
     }
 
-    /// Sets the creation timestamp.
-    fn set_created(&mut self, created: String) {
-        self.created = Some(created);
-    }
 
     /// Sets the preview preference.
     fn set_preview(&mut self, preview: bool) {
@@ -965,9 +957,6 @@ impl Frontmatter {
         &self.tags
     }
 
-    fn set_tags(&mut self, tags: Vec<String>) {
-        self.tags = tags;
-    }
 
     /// Parses a frontmatter block from the start of `text`. Returns the parsed
     /// frontmatter and the body (everything after the closing `---` line).
@@ -1029,8 +1018,9 @@ impl Frontmatter {
 }
 
 /// Finds Markdown hashtags while excluding inline and fenced code.
+#[cfg(test)]
 #[must_use]
-pub fn discover_tags(text: &str) -> Vec<String> {
+fn discover_tags(text: &str) -> Vec<String> {
     let mut tags = Vec::new();
     let mut fence: Option<(u8, usize)> = None;
     for line in text.lines() {
@@ -1054,8 +1044,8 @@ pub fn discover_tags(text: &str) -> Vec<String> {
             continue;
         }
         let mut inline_ticks = 0usize;
-        let mut chars = line.char_indices().peekable();
-        while let Some((index, ch)) = chars.next() {
+        let chars = line.char_indices().peekable();
+        for (index, ch) in chars {
             if ch == '`' {
                 inline_ticks = if inline_ticks == 0 {
                     line[index..].chars().take_while(|c| *c == '`').count()

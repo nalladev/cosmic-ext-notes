@@ -232,7 +232,7 @@ impl Tab {
         if let Some(parent) = self.path.as_ref().and_then(|path| path.parent()) {
             self.editor.set_image_directory(parent);
         }
-        self.saved_body = body.to_owned();
+        body.clone_into(&mut self.saved_body);
         title.clone_into(&mut self.title_draft);
         self.tags = tags.to_vec();
         self.tag_draft.clear();
@@ -1272,7 +1272,7 @@ impl AppModel {
         match self.vault.save_with_tags(&path, &body, &tags) {
             Ok(Some(SaveOutcome::Saved)) => {
                 if let Some(tab) = self.active_tab_mut() {
-                    tab.saved_body = body.clone();
+                    tab.saved_body.clone_from(&body);
                     tab.dirty = false;
                 }
                 if notify {
@@ -1354,7 +1354,7 @@ impl AppModel {
             return;
         }
         let first_line = source.lines().next().unwrap_or_default();
-        let has_header = crate::notes::header_tags(first_line).len() > 0;
+        let has_header = !crate::notes::header_tags(first_line).is_empty();
         let old_end = if has_header {
             source.find('\n').map_or(source.len(), |index| index + 1)
         } else {
@@ -1485,7 +1485,7 @@ impl AppModel {
             self.vault.tree().root(),
             &self.expanded,
             selected.as_deref(),
-            if has_pinned { 1 } else { 0 },
+            u16::from(has_pinned),
         );
         self.nav_model = model;
     }

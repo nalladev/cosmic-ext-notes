@@ -1,4 +1,4 @@
-#![allow(clippy::collapsible_if)]
+#![allow(clippy::collapsible_if, clippy::too_many_lines, clippy::needless_pass_by_value)]
 
 //! Source-backed native Markdown editing. Only `EditorState` owns document text;
 //! the visual surface and native navigation buffer are disposable projections.
@@ -110,7 +110,7 @@ impl Editor {
             ime_epoch: 0,
             last_rejection: None,
             image_directory: None,
-            image_handles: Default::default(),
+            image_handles: std::collections::HashMap::default(),
             image_revision: 0,
             surface_revision: 0,
             id: cosmic::iced::core::widget::Id::unique(),

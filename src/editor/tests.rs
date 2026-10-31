@@ -58,7 +58,7 @@ fn construction_preserves_authored_bytes_and_renders_inline_styles() {
     );
     assert!(editor.surface.projection.spans.iter().any(|s| s.style.code));
     assert!(editor.surface.projection.spans.iter().any(|s| s.link));
-    assert_eq!(editor.surface.rows[0].cells[0].presentation.size, 27.0);
+    assert!((editor.surface.rows[0].cells[0].presentation.size - 27.0).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -369,9 +369,13 @@ fn stale_hits_noop_redo_and_checked_journal() {
 
 #[test]
 fn wrapped_vertical_navigation_and_caret_follow_use_native_geometry() {
-    let source = (0..40)
-        .map(|i| format!("line {i} with enough words to wrap into several lines\n"))
-        .collect::<String>();
+    use std::fmt::Write as _;
+
+    let mut source = String::new();
+    for i in 0..40 {
+        writeln!(source, "line {i} with enough words to wrap into several lines")
+            .expect("write to string");
+    }
     let mut editor = Editor::new(&source);
     let mut harness = Harness::new(&editor, 180.0, 130.0);
     harness.click(&mut editor, 4);
@@ -543,7 +547,7 @@ fn native_edit_sequences_keep_utf8_mappings_and_checked_mutations_valid() {
     harness.click(&mut editor, 2);
     let mut random = 19u32;
     for _ in 0..120 {
-        random = random.wrapping_mul(1664525).wrapping_add(1013904223);
+        random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         match random % 10 {
             0 => named(&mut harness, &mut editor, Named::ArrowLeft),
             1 => named(&mut harness, &mut editor, Named::ArrowRight),

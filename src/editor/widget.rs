@@ -1,4 +1,13 @@
-use super::*;
+#![allow(
+    clippy::items_after_statements,
+    clippy::too_many_lines,
+    clippy::needless_pass_by_value,
+    clippy::struct_excessive_bools,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+)]
+
+use super::{Editor, Range, EditorOwner, ImeOwner, VisualCaretAffinity, Message, projection, Action, ImeEvent, Edit, MarkdownFormat, Motion};
 use cosmic::iced::core::image;
 use cosmic::{
     Renderer, Theme,
@@ -676,7 +685,7 @@ fn route(
     let revision = editor.surface_revision;
     match event {
         Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
-            state.modifiers = *modifiers
+            state.modifiers = *modifiers;
         }
         Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
             if let Some(point) = cursor
@@ -869,25 +878,25 @@ fn route(
                     });
                 }
                 Key::Character("z" | "Z") if command => {
-                    message = Some(if shift { Message::Redo } else { Message::Undo })
+                    message = Some(if shift { Message::Redo } else { Message::Undo });
                 }
                 Key::Character("y" | "Y") if command => message = Some(Message::Redo),
                 Key::Character("a" | "A") if command => {
-                    message = Some(Message::Action(Action::SelectAll))
+                    message = Some(Message::Action(Action::SelectAll));
                 }
                 Key::Character("b" | "B") if command => {
-                    message = Some(Message::Format(MarkdownFormat::Bold))
+                    message = Some(Message::Format(MarkdownFormat::Bold));
                 }
                 Key::Character("i" | "I") if command => {
-                    message = Some(Message::Format(MarkdownFormat::Italic))
+                    message = Some(Message::Format(MarkdownFormat::Italic));
                 }
                 Key::Character("k" | "K") if command => {
-                    message = Some(Message::Format(MarkdownFormat::Link))
+                    message = Some(Message::Format(MarkdownFormat::Link));
                 }
                 Key::Character("e" | "E") if command => message = Some(Message::ToggleSource),
                 Key::Named(Named::Tab) => message = Some(Message::Indent(!shift)),
                 Key::Named(Named::Enter) => {
-                    message = Some(Message::Action(Action::Edit(Edit::Enter)))
+                    message = Some(Message::Action(Action::Edit(Edit::Enter)));
                 }
                 Key::Named(Named::Backspace | Named::Delete) => {
                     let forward = matches!(key.as_ref(), Key::Named(Named::Delete));
@@ -992,7 +1001,7 @@ fn route(
     }
 }
 
-/// Headless event harness: native paragraph layout and the exact Widget::update
+/// Headless event harness: native paragraph layout and the exact `Widget::update`
 /// router, without creating a window, GPU device, or alternate editing model.
 #[cfg(test)]
 pub(super) struct Harness {
