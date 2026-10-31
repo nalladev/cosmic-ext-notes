@@ -170,7 +170,6 @@ enum NavEntry {
     Folder(PathBuf),
     Note(PathBuf),
     PinnedHeader,
-    PinnedSeparator,
 }
 
 /// The open sidebar dialog: creates or renames a folder.
@@ -307,7 +306,7 @@ impl cosmic::Application for AppModel {
                 Task::none()
             }
             Some(NavEntry::Note(path)) => self.open_tab(&path, false),
-            Some(NavEntry::PinnedHeader | NavEntry::PinnedSeparator) | None => Task::none(),
+            Some(NavEntry::PinnedHeader) | None => Task::none(),
         }
     }
 
@@ -438,7 +437,7 @@ impl cosmic::Application for AppModel {
                             NavMenuAction::DeleteItem(entity),
                         ));
                     }
-                    Some(NavEntry::PinnedHeader | NavEntry::PinnedSeparator) | None => {}
+                    Some(NavEntry::PinnedHeader) | None => {}
                 }
                 items
             })
@@ -1476,11 +1475,6 @@ impl AppModel {
                     .text(note.title().to_owned())
                     .data(NavEntry::Note(note.path().to_path_buf()));
             }
-            model
-                .insert()
-                .indent(1)
-                .text("────────────────────────")
-                .data(NavEntry::PinnedSeparator);
         }
         Self::append_nav_nodes(
             &mut model,
@@ -1489,6 +1483,7 @@ impl AppModel {
             &self.expanded,
             selected.as_deref(),
             u16::from(has_pinned),
+            has_pinned,
         );
         self.nav_model = model;
     }
@@ -1501,14 +1496,21 @@ impl AppModel {
         expanded: &HashSet<PathBuf>,
         selected: Option<&Path>,
         indent: u16,
+        divider_above_first: bool,
     ) {
+        let mut first = true;
         for node in nodes {
+            let divider_above = divider_above_first && first;
+            first = false;
             match node {
                 TreeNode::Folder { .. } => {
                     let path = node.path().to_path_buf();
                     let open = expanded.contains(&path);
-                    model
-                        .insert()
+                    let mut entry = model.insert();
+                    if divider_above {
+                        entry = entry.divider_above(true);
+                    }
+                    entry
                         .indent(indent)
                         .icon(icon::from_name(if open {
                             "folder-open-symbolic"
@@ -1525,13 +1527,17 @@ impl AppModel {
                             expanded,
                             selected,
                             indent + 1,
+                            false,
                         );
                     }
                 }
                 TreeNode::File { .. } => {
                     let path = node.path().to_path_buf();
-                    let entity = model
-                        .insert()
+                    let mut entry = model.insert();
+                    if divider_above {
+                        entry = entry.divider_above(true);
+                    }
+                    let entity = entry
                         .indent(indent)
                         .text(node.name().to_owned())
                         .data(NavEntry::Note(path.clone()))
@@ -1670,7 +1676,7 @@ impl AppModel {
                     Task::none()
                 }
             },
-            NavEntry::PinnedHeader | NavEntry::PinnedSeparator => Task::none(),
+            NavEntry::PinnedHeader => Task::none(),
             NavEntry::Folder(path) => match self.vault.delete_folder(&path) {
                 Ok(_) => {
                     self.expanded
