@@ -144,6 +144,22 @@ flatpak-install: vendor-flatpak
     echo "Installed local test build — launch it from the application menu"
     echo "Replaces any existing install (store version or local build)"
 
+# Build and install using the Flathub manifest.
+# Uses the release source pinned in the Flathub manifest.
+flatpak-install-flathub: vendor-flatpak
+    #!/usr/bin/env bash
+    set -euo pipefail
+    APP="io.github.nalladev.cosmic-ext-notes"
+    BUILD_DIR="build-dir-flathub"
+
+    flatpak uninstall --user -y "$APP" 2>/dev/null || true
+    rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/flatpak/app/$APP"
+
+    flatpak-builder --user --install --force-clean "$BUILD_DIR" io.github.nalladev.cosmic-ext-notes.yml
+
+    echo "Installed Flathub manifest build — launch it from the application menu"
+    echo "Uses the release source pinned in the Flathub manifest"
+
 # Remove the local test build.
 flatpak-uninstall:
     flatpak uninstall --user io.github.nalladev.cosmic-ext-notes
