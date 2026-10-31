@@ -28,6 +28,9 @@ features = [
     "about",
     # On app startup, focuses an existing instance if the app is already open
     "single-instance",
+    # Loads and watches COSMIC settings through cosmic-settings-daemon,
+    # including live system theme, accent-colour, and frosted-glass updates.
+    "dbus-config",
 
     # Async runtime used by the toaster (auto-dismiss) and autosave tick
     "tokio",

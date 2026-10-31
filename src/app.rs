@@ -506,6 +506,9 @@ impl cosmic::Application for AppModel {
         core: cosmic::Core,
         _flags: Self::Flags,
     ) -> (Self, Task<cosmic::Action<Self::Message>>) {
+        let mut core = core;
+        core.set_auto_blur(cosmic::core::Auto::Window | cosmic::core::Auto::Popup);
+
         // Create the about widget
         let about = About::default()
             .name(fl!("app-title"))
