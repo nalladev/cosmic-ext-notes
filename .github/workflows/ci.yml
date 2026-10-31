@@ -36,7 +36,7 @@ jobs:
 
       - name: Validate manifest syntax
         run: |
-          flatpak-builder --show-manifest flatpak/com.github.nalladev.cosmic-notes.json > /dev/null
+          flatpak-builder --show-manifest flatpak/io.github.nalladev.cosmic-notes.json > /dev/null
 
       - name: Validate AppStream metadata
         run: |

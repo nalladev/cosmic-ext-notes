@@ -2,7 +2,7 @@
 Name=Cosmic Notes
 Comment=A notes application for the COSMIC desktop
 Type=Application
-Icon=com.github.nalladev.cosmic-notes
+Icon=io.github.nalladev.cosmic-notes
 Exec=cosmic-notes %F
 Terminal=false
 StartupNotify=true

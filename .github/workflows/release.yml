@@ -103,12 +103,12 @@ jobs:
       - name: Build Flatpak
         run: |
           flatpak-builder --force-clean --ccache --mirror-screenshots-url=https://dl.flathub.org/media/ \
-            --install-deps-from=flathub --repo=flatpak-repo build-dir flatpak/com.github.nalladev.cosmic-notes.json
+            --install-deps-from=flathub --repo=flatpak-repo build-dir flatpak/io.github.nalladev.cosmic-notes.json
 
       - name: Create Flatpak bundle
         run: |
           flatpak build-bundle flatpak-repo cosmic-notes.flatpak \
-            com.github.nalladev.cosmic-notes
+            io.github.nalladev.cosmic-notes
 
       - name: Upload Flatpak artifact
         uses: actions/upload-artifact@v4
