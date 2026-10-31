@@ -27,8 +27,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
       - name: Install flatpak-builder and appstreamcli
         run: |
@@ -37,46 +35,15 @@ jobs:
 
       - name: Validate manifest syntax
         run: |
-          flatpak-builder --show-manifest flatpak/io.github.nalladev.cosmic-ext-notes.json > /dev/null
+          flatpak-builder --show-manifest io.github.nalladev.cosmic-ext-notes.json > /dev/null
 
       - name: Validate AppStream metadata
         run: |
           appstreamcli validate resources/app.metainfo.xml
 
-      - name: Lint Flathub manifest
+      - name: Lint Flatpak manifest
         run: |
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/mnt" \
             ghcr.io/flathub/flatpak-builder-lint:latest \
-            manifest --gha-format /mnt/io.github.nalladev.cosmic-ext-notes.yml
-
-      - name: Checkout flatpak-builder-tools
-        run: |
-          git clone --depth 1 https://github.com/flatpak/flatpak-builder-tools.git
-
-      - name: Install Python dependencies for generator
-        run: |
-          pip3 install aiohttp tomlkit PyYAML
-
-      - name: Check cargo-sources.json is up to date
-        run: |
-          OUT="flatpak/cargo-sources.json"
-          REGEN="flatpak/cargo-sources-regen.json"
-
-          if [ ! -f "$OUT" ]; then
-            echo "Error: $OUT is missing. Run 'just vendor-flatpak' to generate it."
-            exit 1
-          fi
-
-          python3 flatpak-builder-tools/cargo/flatpak-cargo-generator.py -o "$REGEN" Cargo.lock
-
-          if ! cmp -s "$OUT" "$REGEN"; then
-            echo "Error: $OUT is out of date with Cargo.lock."
-            echo "Run 'just vendor-flatpak' locally and commit the updated file."
-            diff -u "$OUT" "$REGEN" || true
-            rm "$REGEN"
-            exit 1
-          fi
-
-          rm "$REGEN"
-          echo "$OUT is up to date."
+            manifest --gha-format /mnt/io.github.nalladev.cosmic-ext-notes.json

@@ -15,7 +15,8 @@
     "--talk-name=com.system76.CosmicSettingsDaemon.*",
     "--talk-name=com.system76.CosmicSettingsDaemon",
     "--device=dri",
-    "--filesystem=xdg-documents"
+    "--filesystem=xdg-documents",
+    "--filesystem=xdg-config/cosmic:rw"
   ],
   "build-options": {
     "append-path": "/usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm20/bin",
@@ -38,9 +39,8 @@
       ],
       "sources": [
         {
-          "type": "git",
-          "url": "https://github.com/nalladev/cosmic-ext-notes.git",
-          "tag": "v0.1.2"
+          "type": "dir",
+          "path": "."
         },
         "cargo-sources.json"
       ]

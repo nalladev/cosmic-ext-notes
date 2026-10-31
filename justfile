@@ -2,6 +2,8 @@
 name := 'cosmic-ext-notes'
 # The unique ID of the application.
 appid := 'io.github.nalladev.cosmic-ext-notes'
+# manifest file for the application.
+manifest := appid + '.json'
 # The git repository this project is published from.
 repo-url := 'https://github.com/nalladev/cosmic-ext-notes.git'
 
@@ -34,7 +36,7 @@ clean-vendor:
 # cold (recompile / re-download). Don't run while a flatpak build is in progress
 # (it removes the temp manifest and build dir being used).
 clean-dist: clean clean-vendor
-    rm -rf build-dir .flatpak-builder flatpak-repo flatpak/local-build.json
+    rm -rf build-dir .flatpak-builder flatpak-repo cargo-sources.json cargo-sources-regen.json
     rm -rf scripts/__pycache__
 
 # Compiles with debug profile
@@ -110,12 +112,13 @@ vendor-extract:
     rm -rf vendor
     tar pxf vendor.tar
 
-# Regenerate flatpak cargo sources only if Cargo.lock changed.
+# Regenerate local Flatpak cargo sources only if Cargo.lock changed.
+# The generated file is ignored and is never committed.
 # The generator is cloned into ${TMPDIR:-/tmp} once; /tmp self-cleans on reboot.
 vendor-flatpak:
     #!/usr/bin/env bash
     set -euo pipefail
-    OUT="flatpak/cargo-sources.json"
+    OUT="cargo-sources.json"
     if [ ! -f "$OUT" ] || [ Cargo.lock -nt "$OUT" ]; then
         echo "Regenerating $OUT ..."
         CACHE="${TMPDIR:-/tmp}/flatpak-builder-tools"
@@ -127,42 +130,17 @@ vendor-flatpak:
         echo "$OUT is up to date"
     fi
 
-# Build and install the local test build from a throwaway copy of the
-# manifest (dir source); the committed manifest keeps its git source.
-flatpak-install: vendor-flatpak
+# Build and install the local Flatpak from the working tree.
+# The generated cargo source list is local-only; --ccache keeps rebuilds fast.
+flatpak-install *args: vendor-flatpak
     #!/usr/bin/env bash
     set -euo pipefail
-    APP="io.github.nalladev.cosmic-ext-notes"
-    LOCAL="flatpak/local-build.json"
-    python3 scripts/flatpak-manifest.py to-dir "$LOCAL"
-    trap 'rm -f "$LOCAL"' EXIT
-    flatpak uninstall --user -y "$APP" 2>/dev/null || true # clear any existing app
-    rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/flatpak/app/$APP" # clean any stale files
-    flatpak-builder --user --install --force-clean build-dir "$LOCAL"
-    trap - EXIT
-    rm -f "$LOCAL"
-    echo "Installed local test build — launch it from the application menu"
-    echo "Replaces any existing install (store version or local build)"
-
-# Build and install using the Flathub manifest.
-# Uses the release source pinned in the Flathub manifest.
-flatpak-install-flathub: vendor-flatpak
-    #!/usr/bin/env bash
-    set -euo pipefail
-    APP="io.github.nalladev.cosmic-ext-notes"
-    BUILD_DIR="build-dir-flathub"
-
-    flatpak uninstall --user -y "$APP" 2>/dev/null || true
-    rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/flatpak/app/$APP"
-
-    flatpak-builder --user --install --force-clean "$BUILD_DIR" io.github.nalladev.cosmic-ext-notes.yml
-
-    echo "Installed Flathub manifest build — launch it from the application menu"
-    echo "Uses the release source pinned in the Flathub manifest"
+    flatpak-builder --user --install --ccache {{args}} build-dir {{manifest}}
+    echo "Installed local Flatpak dev build — launch it from the application menu"
 
 # Remove the local test build.
 flatpak-uninstall:
-    flatpak uninstall --user io.github.nalladev.cosmic-ext-notes
+    flatpak uninstall --user {{appid}}
     echo "To get the production copy back, reinstall from the COSMIC store."
 
 # Bump the version in Cargo.toml, run cargo check, commit everything staged, and tag.
@@ -187,8 +165,7 @@ release version message='':
     # Normalize version: strip leading 'v' if present
     norm_version=`bash -c 'v="{{version}}"; echo "${v#v}"'` && \
     python3 scripts/update-metainfo-release.py "$norm_version" "{{message}}" "{{repo-url}}" && \
-    python3 scripts/flatpak-manifest.py to-git "$norm_version" "{{repo-url}}" && \
-    git add resources/app.metainfo.xml flatpak/io.github.nalladev.cosmic-ext-notes.json && \
+    git add resources/app.metainfo.xml {{manifest}} && \
     just tag "{{version}}" "{{message}}" && \
     git push origin main && \
     git push origin v"$norm_version"
